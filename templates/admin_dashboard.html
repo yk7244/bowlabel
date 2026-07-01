@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+{% block title %}관리자 대시보드 - BowLabel{% endblock %}
+{% block content %}
+<div class="page-header">
+  <h2>관리자 대시보드</h2>
+  <a href="{{ url_for('create_project') }}" class="btn-primary">+ 새 프로젝트</a>
+</div>
+
+<!-- Projects -->
+<section class="section">
+  <h3>프로젝트</h3>
+  {% if projects %}
+  <div class="card-grid">
+    {% for p in projects %}
+    <a class="card project-card" href="{{ url_for('project_detail', pid=p.id) }}">
+      <div class="card-title">{{ p.name }}</div>
+      <div class="card-meta">{{ p.description or '' }}</div>
+      <div class="card-stats">
+        <span>📹 영상 {{ p.video_count }}</span>
+        <span>🖼️ 프레임 {{ p.frame_count }}</span>
+        <span>✅ 완료 {{ p.labeled_count or 0 }}</span>
+      </div>
+      {% if p.frame_count and p.frame_count > 0 %}
+      <div class="progress-bar">
+        <div class="progress-fill"
+             style="width: {{ ((p.labeled_count or 0) / p.frame_count * 100)|int }}%"></div>
+      </div>
+      <div class="progress-text">
+        {{ ((p.labeled_count or 0) / p.frame_count * 100)|int }}% 완료
+      </div>
+      {% endif %}
+    </a>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="empty-state">프로젝트가 없습니다. 새 프로젝트를 만들어보세요.</div>
+  {% endif %}
+</section>
+
+<!-- Users -->
+<section class="section">
+  <h3>라벨러 관리</h3>
+  <div class="table-wrap">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>ID</th><th>이름</th><th>권한</th><th>완료 수</th><th>상태</th><th>액션</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for u in users %}
+        <tr class="{{ 'inactive' if not u.is_active }}">
+          <td>{{ u.id }}</td>
+          <td>{{ u.username }}</td>
+          <td><span class="badge {{ 'badge-admin' if u.role == 'admin' else 'badge-labeler' }}">{{ u.role }}</span></td>
+          <td>{{ u.labeled_count }}</td>
+          <td><span class="badge {{ 'badge-on' if u.is_active else 'badge-off' }}">
+            {{ '활성' if u.is_active else '비활성' }}</span></td>
+          <td class="action-btns">
+            <form method="post" action="{{ url_for('toggle_user', uid=u.id) }}" style="display:inline">
+              <button class="btn-sm {{ 'btn-warn' if u.is_active else 'btn-ok' }}">
+                {{ '비활성화' if u.is_active else '활성화' }}</button>
+            </form>
+            <button class="btn-sm btn-secondary" onclick="showResetPw({{ u.id }}, '{{ u.username }}')">
+              비번 변경</button>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Add user form -->
+  <div class="inline-form">
+    <h4>새 라벨러 추가</h4>
+    <form method="post" action="{{ url_for('add_user') }}" class="form-row">
+      <input type="text" name="username" placeholder="아이디" required>
+      <input type="password" name="password" placeholder="비밀번호" required>
+      <select name="role">
+        <option value="labeler">라벨러</option>
+        <option value="admin">관리자</option>
+      </select>
+      <button type="submit" class="btn-primary">추가</button>
+    </form>
+  </div>
+</section>
+
+<!-- Reset PW modal -->
+<div id="modal-reset-pw" class="modal hidden">
+  <div class="modal-box">
+    <h4 id="modal-reset-title">비밀번호 변경</h4>
+    <form method="post" id="form-reset-pw">
+      <div class="form-group">
+        <label>새 비밀번호</label>
+        <input type="password" name="new_password" required>
+      </div>
+      <div class="modal-actions">
+        <button type="submit" class="btn-primary">변경</button>
+        <button type="button" class="btn-secondary" onclick="closeModal()">취소</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+{% endblock %}
+{% block scripts %}
+<script>
+function showResetPw(uid, uname) {
+  document.getElementById('modal-reset-title').textContent = `${uname} 비밀번호 변경`;
+  document.getElementById('form-reset-pw').action = `/admin/users/${uid}/reset_password`;
+  document.getElementById('modal-reset-pw').classList.remove('hidden');
+}
+function closeModal() {
+  document.querySelectorAll('.modal').forEach(m => m.classList.add('hidden'));
+}
+</script>
+{% endblock %}

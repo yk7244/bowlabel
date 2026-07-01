@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}내 작업 - BowLabel{% endblock %}
+{% block content %}
+<div class="page-header">
+  <h2>👋 {{ username }}님의 작업 목록</h2>
+  <span class="badge badge-on">완료: {{ done_count }}개</span>
+</div>
+
+{% if tasks %}
+<div class="table-wrap">
+  <table class="data-table">
+    <thead>
+      <tr>
+        <th>프로젝트</th><th>영상</th><th>프레임 #</th><th>시간</th><th>상태</th><th>액션</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for t in tasks %}
+      <tr>
+        <td><span class="badge badge-labeler">{{ t.project_name }}</span></td>
+        <td title="{{ t.original_name }}">{{ t.original_name[:25] }}{% if t.original_name|length > 25 %}...{% endif %}</td>
+        <td>{{ t.frame_index }}</td>
+        <td>{{ "%.2f"|format(t.timestamp_sec or 0) }}s</td>
+        <td>
+          <span class="badge {{ 'badge-warn' if t.status == 'in_progress' else 'badge-pending' }}">
+            {{ '진행중' if t.status == 'in_progress' else '미완료' }}
+          </span>
+        </td>
+        <td>
+          <a href="{{ url_for('annotate', frame_id=t.id) }}" class="btn-sm btn-primary">
+            ✏️ 어노테이션
+          </a>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="empty-state">
+  <div style="font-size:48px;margin-bottom:16px">🎉</div>
+  <p>배정된 작업이 없습니다. 관리자에게 작업 배분을 요청하세요.</p>
+</div>
+{% endif %}
+{% endblock %}

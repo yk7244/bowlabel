@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{% block title %}BowLabel{% endblock %}</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+{% block head %}{% endblock %}
+</head>
+<body>
+{% if session.get('user_id') %}
+<nav class="navbar">
+  <div class="nav-brand">🎻 BowLabel</div>
+  <div class="nav-links">
+    {% if session.get('role') == 'admin' %}
+      <a href="{{ url_for('admin_dashboard') }}">대시보드</a>
+    {% else %}
+      <a href="{{ url_for('labeler_dashboard') }}">내 작업</a>
+    {% endif %}
+    <span class="nav-user">{{ session.get('username') }} ({{ session.get('role') }})</span>
+    <a href="{{ url_for('logout') }}" class="btn-logout">로그아웃</a>
+  </div>
+</nav>
+{% endif %}
+<main class="main-content">
+{% block content %}{% endblock %}
+</main>
+<script src="{{ url_for('static', filename='js/main.js') }}"></script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

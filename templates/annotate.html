@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+{% block title %}어노테이션 - {{ frame.filename }}{% endblock %}
+{% block head %}
+<style>
+body { overflow: hidden; }
+.main-content { padding: 0; height: calc(100vh - 48px); display: flex; }
+</style>
+{% endblock %}
+{% block content %}
+
+<!-- Left: Canvas -->
+<div class="annotate-canvas-wrap" id="canvas-wrap">
+  <canvas id="canvas"></canvas>
+  <div id="canvas-hint" class="canvas-hint">이미지 로딩중...</div>
+</div>
+
+<!-- Right: Control Panel -->
+<div class="annotate-panel">
+  <div class="panel-header">
+    <div class="frame-info">
+      <b>{{ frame.project_name }}</b><br>
+      <span class="muted">{{ frame.original_name }}</span><br>
+      <span class="muted">프레임 #{{ frame.frame_index }} / {{ "%.2f"|format(frame.timestamp_sec or 0) }}s</span>
+    </div>
+    <div class="nav-btns">
+      {% if prev_id %}
+      <a href="{{ url_for('annotate', frame_id=prev_id) }}" class="btn-sm btn-secondary" title="이전 (← 키)">◀ 이전</a>
+      {% else %}
+      <button class="btn-sm btn-secondary" disabled>◀ 이전</button>
+      {% endif %}
+      {% if next_id %}
+      <a href="{{ url_for('annotate', frame_id=next_id) }}" class="btn-sm btn-secondary" id="btn-next" title="다음 (→ 키)">다음 ▶</a>
+      {% else %}
+      <button class="btn-sm btn-secondary" disabled>다음 ▶</button>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- Mode -->
+  <div class="panel-section">
+    <div class="mode-btns">
+      <button class="mode-btn active" id="mode-kp" onclick="setMode('keypoint')">🎯 키포인트</button>
+      <button class="mode-btn" id="mode-bbox" onclick="setMode('bbox')">📦 BBox</button>
+    </div>
+    <div class="hint-text" id="mode-hint">키포인트를 순서대로 클릭하세요. 우클릭=안보임</div>
+  </div>
+
+  <!-- Keypoints list -->
+  <div class="panel-section kp-list-wrap">
+    <div class="kp-list-header">
+      <span>키포인트 목록</span>
+      <button class="btn-sm btn-warn" onclick="resetAll()">전체 초기화</button>
+    </div>
+    <div class="kp-list" id="kp-list">
+      {% for kp in schema %}
+      <div class="kp-item" id="kp-item-{{ kp.id }}" onclick="selectKP({{ kp.id }})">
+        <span class="kp-dot" style="background:{{ kp.color }}"></span>
+        <span class="kp-name">{{ kp.name }}</span>
+        <span class="kp-group muted">{{ kp.group }}</span>
+        <span class="kp-status" id="kp-status-{{ kp.id }}">—</span>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+
+  <!-- Notes -->
+  <div class="panel-section">
+    <label>메모</label>
+    <textarea id="notes" rows="2" placeholder="이 프레임에 대한 메모..." style="width:100%"></textarea>
+  </div>
+
+  <!-- Save -->
+  <div class="panel-section">
+    <button class="btn-primary full-width" onclick="saveAnnotation()" id="btn-save">
+      💾 저장 (Enter)
+    </button>
+    <div id="save-status" class="muted" style="text-align:center;margin-top:6px"></div>
+    <div class="shortcut-help">
+      <b>단축키</b><br>
+      Enter = 저장 | ← → = 이전/다음<br>
+      숫자 1~9 = 키포인트 선택<br>
+      R = 선택 키포인트 초기화 | Esc = 선택 해제<br>
+      우클릭 = occluded(안보임) 토글
+    </div>
+  </div>
+</div>
+
+<!-- Hidden data -->
+<script>
+const FRAME_ID   = {{ frame.id }};
+const VIDEO_ID   = {{ frame.video_id }};
+const IMG_URL    = "{{ url_for('serve_frame', video_id=frame.video_id, filename=frame.filename) }}";
+const IMG_W      = {{ frame.width or 1920 }};
+const IMG_H      = {{ frame.height or 1080 }};
+const SCHEMA     = {{ schema | tojson }};
+const CONNECTIONS= {{ connections | tojson }};
+const EXISTING   = {{ (existing.keypoints if existing else 'null') | safe }};
+const EXISTING_BBOX = {{ (existing.bbox if existing else 'null') | safe }};
+const EXISTING_NOTES = {{ (existing.notes if existing else '""') | tojson }};
+const NEXT_ID    = {{ next_id or 'null' }};
+</script>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/annotate.js') }}"></script>
+{% endblock %}
