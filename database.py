@@ -106,7 +106,7 @@ def seed_admin(username="admin", password="admin1234"):
     try:
         conn.execute(
             "INSERT OR IGNORE INTO users (username, password_hash, role) VALUES (?, ?, 'admin')",
-            (username, generate_password_hash(password))
+            (username, generate_password_hash(password, method="pbkdf2:sha256"))
         )
         conn.commit()
         print(f"[DB] Admin created: {username} / {password}")

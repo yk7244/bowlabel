@@ -138,7 +138,7 @@ def add_user():
     try:
         conn.execute(
             "INSERT INTO users (username, password_hash, role) VALUES (?,?,?)",
-            (username, generate_password_hash(password), role)
+            (username, generate_password_hash(password, method="pbkdf2:sha256"), role)
         )
         conn.commit()
     except Exception as e:
@@ -166,7 +166,7 @@ def reset_password(uid):
     new_pw = request.form["new_password"]
     conn = get_db()
     conn.execute("UPDATE users SET password_hash=? WHERE id=?",
-                 (generate_password_hash(new_pw), uid))
+                 (generate_password_hash(new_pw, method="pbkdf2:sha256"), uid))
     conn.commit()
     conn.close()
     return redirect(url_for("admin_dashboard"))
