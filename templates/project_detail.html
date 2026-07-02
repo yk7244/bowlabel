@@ -176,14 +176,14 @@ function loadStats() {
     const pct  = Math.round(done/total*100);
     document.getElementById('stats-bar').innerHTML = `
       <div class="stats-row">
-        <span>전체 <b>${f.total}</b></span>
-        <span>미완료 <b>${f.unlabeled||0}</b></span>
-        <span>완료 <b>${(f.labeled||0)+(f.reviewed||0)}</b></span>
-        <span>검수완료 <b>${f.reviewed||0}</b></span>
-        <span>진행률 <b>${pct}%</b></span>
-        ${d.per_user.map(u=>`<span>👤 ${u.username}: <b>${u.count}</b></span>`).join('')}
+        <span class="stat-pill">전체 <b>${f.total}</b></span>
+        <span class="stat-pill">미완료 <b>${f.unlabeled||0}</b></span>
+        <span class="stat-pill">완료 <b>${(f.labeled||0)+(f.reviewed||0)}</b></span>
+        <span class="stat-pill">검수 <b>${f.reviewed||0}</b></span>
+        <span class="stat-pill">진행률 <b>${pct}%</b></span>
+        ${d.per_user.map(u=>`<span class="stat-pill">👤 ${u.username} <b>${u.count}</b></span>`).join('')}
       </div>
-      <div class="progress-bar" style="margin-top:8px">
+      <div class="progress-bar" style="margin-top:12px">
         <div class="progress-fill" style="width:${pct}%"></div>
       </div>`;
   });

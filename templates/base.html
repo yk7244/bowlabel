@@ -10,14 +10,17 @@
 <body>
 {% if session.get('user_id') %}
 <nav class="navbar">
-  <div class="nav-brand">🎻 BowLabel</div>
+  <div class="nav-brand">🎻 <span>BowLabel</span></div>
   <div class="nav-links">
     {% if session.get('role') == 'admin' %}
-      <a href="{{ url_for('admin_dashboard') }}">대시보드</a>
+      <a href="{{ url_for('admin_dashboard') }}" class="nav-link">대시보드</a>
     {% else %}
-      <a href="{{ url_for('labeler_dashboard') }}">내 작업</a>
+      <a href="{{ url_for('labeler_dashboard') }}" class="nav-link">내 작업</a>
     {% endif %}
-    <span class="nav-user">{{ session.get('username') }} ({{ session.get('role') }})</span>
+    <span class="nav-user">
+      {{ session.get('username') }}
+      <span class="role-pill {{ session.get('role') }}">{{ session.get('role') }}</span>
+    </span>
     <a href="{{ url_for('logout') }}" class="btn-logout">로그아웃</a>
   </div>
 </nav>

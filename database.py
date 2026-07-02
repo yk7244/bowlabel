@@ -114,34 +114,37 @@ def seed_admin(username="admin", password="admin1234"):
         conn.close()
 
 
-# Default violin bow keypoint schema
+# 활쓰기 피드백용 키포인트 스키마 (8개)
+# 관절/손가락은 MediaPipe Pose+Hands로 별도 추론 — 라벨링 부담 최소화
+#
+# 탐지 목적:
+#   bow_*     → 활 각도, 방향(업/다운보우), 속도, sounding point
+#   violin_*  → 현 평면, 활 위치(브릿지~지판 비율)
+#   string_*  → 4현 위치 (브릿지 기준 활이 어느 현에 닿는지)
 DEFAULT_VIOLIN_SCHEMA = [
-    {"id": 0,  "name": "bow_tip",        "color": "#FF4444", "group": "bow"},
-    {"id": 1,  "name": "bow_mid_upper",  "color": "#FF8844", "group": "bow"},
-    {"id": 2,  "name": "bow_mid",        "color": "#FFAA00", "group": "bow"},
-    {"id": 3,  "name": "bow_mid_lower",  "color": "#FFCC44", "group": "bow"},
-    {"id": 4,  "name": "bow_frog",       "color": "#FFFF44", "group": "bow"},
-    {"id": 5,  "name": "r_thumb",        "color": "#44FF44", "group": "right_hand"},
-    {"id": 6,  "name": "r_index",        "color": "#44FFAA", "group": "right_hand"},
-    {"id": 7,  "name": "r_middle",       "color": "#44FFFF", "group": "right_hand"},
-    {"id": 8,  "name": "r_ring",         "color": "#4488FF", "group": "right_hand"},
-    {"id": 9,  "name": "r_pinky",        "color": "#8844FF", "group": "right_hand"},
-    {"id": 10, "name": "r_wrist",        "color": "#CC44FF", "group": "right_arm"},
-    {"id": 11, "name": "r_elbow",        "color": "#FF44CC", "group": "right_arm"},
-    {"id": 12, "name": "r_shoulder",     "color": "#FF4488", "group": "right_arm"},
-    {"id": 13, "name": "l_wrist",        "color": "#AAFFAA", "group": "left_arm"},
-    {"id": 14, "name": "l_elbow",        "color": "#AAFFFF", "group": "left_arm"},
-    {"id": 15, "name": "l_shoulder",     "color": "#AAAAFF", "group": "left_arm"},
-    {"id": 16, "name": "violin_scroll",  "color": "#FFFFFF", "group": "violin"},
-    {"id": 17, "name": "violin_bridge",  "color": "#CCCCCC", "group": "violin"},
-    {"id": 18, "name": "chin_rest",      "color": "#999999", "group": "violin"},
+    {"id": 0, "name": "bow_tip",       "color": "#FF4444", "group": "bow",     "desc": "활 끝 (tip)"},
+    {"id": 1, "name": "bow_frog",      "color": "#FFAA00", "group": "bow",     "desc": "개구리 (frog)"},
+    {"id": 2, "name": "bow_mid",       "color": "#FF8844", "group": "bow",     "desc": "활 중앙"},
+    {"id": 3, "name": "bow_contact",   "color": "#FF6666", "group": "bow",     "desc": "활모-현 접점"},
+    {"id": 4, "name": "violin_bridge", "color": "#FFFFFF", "group": "violin",  "desc": "브릿지 중앙"},
+    {"id": 5, "name": "violin_nut",    "color": "#CCCCCC", "group": "violin",  "desc": "넛 (scroll쪽)"},
+    {"id": 6, "name": "string_g",      "color": "#44FF88", "group": "strings", "desc": "G현 (브릿지)"},
+    {"id": 7, "name": "string_e",      "color": "#4488FF", "group": "strings", "desc": "E현 (브릿지)"},
 ]
 
+# 필수 키포인트 (저장 전 검증)
+REQUIRED_KEYPOINTS = ["bow_tip", "bow_frog", "bow_contact", "violin_bridge"]
+
+GROUP_LABELS = {
+    "bow": "활 (Bow)",
+    "violin": "바이올린",
+    "strings": "현 (Strings)",
+}
+
 SKELETON_CONNECTIONS = [
-    [0, 1], [1, 2], [2, 3], [3, 4],   # bow
-    [5, 6], [6, 7], [7, 8], [8, 9],   # right hand fingers
-    [4, 5], [4, 6], [4, 7], [4, 8], [4, 9],  # frog to fingers
-    [5, 10], [10, 11], [11, 12],       # right arm
-    [13, 14], [14, 15],                # left arm
-    [16, 17],                          # violin
+    [0, 2], [2, 1],        # bow: tip → mid → frog
+    [3, 2],                # contact → mid
+    [4, 5],                # bridge → nut (현 평면)
+    [6, 4], [4, 7],        # G현 → bridge → E현
+    [3, 4],                # contact → bridge (sounding point 참조)
 ]

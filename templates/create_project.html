@@ -2,7 +2,7 @@
 {% block title %}새 프로젝트 - BowLabel{% endblock %}
 {% block content %}
 <div class="page-header">
-  <h2>새 프로젝트 만들기</h2>
+  <h2>새 프로젝트</h2>
   <a href="{{ url_for('admin_dashboard') }}" class="btn-secondary">← 뒤로</a>
 </div>
 
@@ -14,12 +14,26 @@
     </div>
     <div class="form-group">
       <label>설명</label>
-      <input type="text" name="description" placeholder="예: 다운보우/업보우 분류용 데이터셋">
+      <input type="text" name="description" placeholder="예: 다운보우/업보우, spiccato 데이터셋">
     </div>
+
     <div class="form-group">
-      <label>키포인트 스키마 (JSON) — 기본값: 바이올린 활쓰기 19개</label>
-      <textarea name="keypoint_schema" rows="20" class="code-editor">{{ default_schema }}</textarea>
+      <label>키포인트 스키마</label>
+      <p class="hint" style="margin-bottom:10px">
+        활 4 + 바이올린 2 + 현 2. 관절·손가락은 MediaPipe로 별도 처리.
+        <span style="color:var(--warn)">*</span> 필수 4개: bow_tip, bow_frog, bow_contact, violin_bridge
+      </p>
+      <div class="schema-preview" style="margin-bottom:14px">
+        {% for kp in schema_preview %}
+        <span class="schema-kp {% if kp.name in required_kps %}required{% endif %}" title="{{ kp.get('desc','') }}">
+          <span class="schema-kp-dot" style="background:{{ kp.color }}"></span>
+          {{ kp.name }}
+        </span>
+        {% endfor %}
+      </div>
+      <textarea name="keypoint_schema" rows="16" class="code-editor">{{ default_schema }}</textarea>
     </div>
+
     <div class="form-actions">
       <button type="submit" class="btn-primary">프로젝트 생성</button>
       <a href="{{ url_for('admin_dashboard') }}" class="btn-secondary">취소</a>

@@ -23,9 +23,10 @@ def export_coco(project_id: int, out_name: str = None) -> str:
     kp_names = [k["name"] for k in schema]
 
     frames = conn.execute("""
-        SELECT f.*, a.keypoints, a.bbox, a.labeled_by
+        SELECT f.*, a.keypoints, a.bbox, a.labeled_by, v.width, v.height
         FROM frames f
         JOIN annotations a ON a.frame_id = f.id
+        JOIN videos v ON v.id = f.video_id
         WHERE f.project_id=? AND f.status IN ('labeled','reviewed')
     """, (project_id,)).fetchall()
 
@@ -33,10 +34,12 @@ def export_coco(project_id: int, out_name: str = None) -> str:
 
     for i, row in enumerate(frames):
         img_id = row["id"]
+        W = row["width"] or 1920
+        H = row["height"] or 1080
         images.append({
             "id": img_id,
             "file_name": f"{row['video_id']}/{row['filename']}",
-            "width": 1920, "height": 1080  # updated per-frame if needed
+            "width": W, "height": H
         })
 
         kps_raw = json.loads(row["keypoints"])

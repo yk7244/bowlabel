@@ -3,18 +3,21 @@
 {% block head %}
 <style>
 body { overflow: hidden; }
-.main-content { padding: 0; height: calc(100vh - 48px); display: flex; flex-direction: column; }
+.main-content { padding: 0; max-width: none; height: calc(100vh - 52px); display: flex; flex-direction: column; }
 .annotate-body { display: flex; flex: 1; overflow: hidden; }
+.kp-dimmed { opacity: 0.35; }
+.group-filter-btn { font-size: 11px; padding: 4px 8px; }
+.group-filter-btn.active { background: var(--bg-hover); border-color: var(--accent2); color: var(--accent2); }
+.kp-required::after { content: '*'; color: #ffcc00; margin-left: 2px; }
 </style>
 {% endblock %}
 {% block content %}
 
-<!-- 상단 진행 바 -->
 <div class="annotate-topbar">
   <div class="topbar-info">
     <span class="project-badge">{{ frame.project_name }}</span>
     <span class="muted">{{ frame.original_name }}</span>
-    <span class="muted">프레임 #{{ frame.frame_index }}  /  {{ "%.2f"|format(frame.timestamp_sec or 0) }}s</span>
+    <span class="muted">#{{ frame.frame_index }} / {{ "%.2f"|format(frame.timestamp_sec or 0) }}s</span>
   </div>
   <div class="topbar-progress">
     <span id="kp-progress-label" class="muted" style="font-size:12px">0 / {{ schema|length }}</span>
@@ -33,54 +36,67 @@ body { overflow: hidden; }
     {% else %}
     <button class="btn-sm btn-secondary" disabled>▶</button>
     {% endif %}
+    <button class="btn-sm btn-secondary" onclick="copyFromPrev()" title="이전 프레임 복사 (C)">📋 복사</button>
     <button class="btn-sm btn-primary" onclick="saveAnnotation(true)" id="btn-save" title="저장 (Enter)">💾 저장</button>
   </div>
 </div>
 
 <div class="annotate-body">
 
-  <!-- 캔버스 영역 -->
   <div class="annotate-canvas-wrap" id="canvas-wrap">
     <canvas id="canvas"></canvas>
     <div id="canvas-hint" class="canvas-hint">이미지 로딩중...</div>
   </div>
 
-  <!-- 오른쪽 패널 -->
   <div class="annotate-panel">
 
-    <!-- 모드 선택 -->
     <div class="panel-section">
       <div class="mode-btns">
         <button class="mode-btn active" id="mode-kp"   onclick="setMode('keypoint')">🎯 키포인트</button>
         <button class="mode-btn"        id="mode-bbox" onclick="setMode('bbox')">📦 BBox</button>
       </div>
-      <div class="hint-text" id="mode-hint">클릭=배치  드래그=이동  우클릭=occluded  휠=줌</div>
+      <div class="hint-text" id="mode-hint">클릭=배치  드래그=이동  C=이전복사</div>
     </div>
 
-    <!-- 키포인트 리스트 -->
+    <!-- 그룹 필터 -->
+    <div class="panel-section">
+      <div class="muted" style="font-size:11px;margin-bottom:6px;font-weight:600">그룹 필터</div>
+      <div class="group-filter-row">
+        <button class="btn-sm btn-secondary group-filter-btn active" data-group="all" onclick="setGroupFilter('all')">전체</button>
+        {% set ng = namespace(seen=[]) %}
+        {% for kp in schema %}
+          {% if kp.group not in ng.seen %}
+            {% set ng.seen = ng.seen + [kp.group] %}
+            <button class="btn-sm btn-secondary group-filter-btn" data-group="{{ kp.group }}"
+                    onclick="setGroupFilter('{{ kp.group }}')">{{ group_labels.get(kp.group, kp.group) }}</button>
+          {% endif %}
+        {% endfor %}
+      </div>
+    </div>
+
     <div class="kp-list-wrap">
       <div class="kp-list-header">
-        <span>키포인트</span>
-        <button class="btn-sm btn-warn" onclick="resetAll()" title="전체 초기화">↺ 초기화</button>
+        <span>키포인트 <span class="muted" style="font-size:10px">* = 필수</span></span>
+        <button class="btn-sm btn-warn" onclick="resetAll()" title="전체 초기화">↺</button>
       </div>
       <div class="kp-list" id="kp-list">
         {% set ns = namespace(cur_group='') %}
         {% for kp in schema %}
           {% if kp.group != ns.cur_group %}
             {% set ns.cur_group = kp.group %}
-            <div class="kp-group-header">{{ kp.group }}</div>
+            <div class="kp-group-header">{{ group_labels.get(kp.group, kp.group) }}</div>
           {% endif %}
-          <div class="kp-item" id="kp-item-{{ kp.id }}" onclick="selectKP({{ loop.index0 }})">
+          <div class="kp-item" id="kp-item-{{ kp.id }}" onclick="selectKP({{ loop.index0 }})"
+               title="{{ kp.get('desc', '') }}">
             <span class="kp-idx muted">{{ loop.index }}</span>
             <span class="kp-dot" style="background:{{ kp.color }}"></span>
-            <span class="kp-name">{{ kp.name }}</span>
+            <span class="kp-name{% if kp.name in required_kps %} kp-required{% endif %}">{{ kp.name }}</span>
             <span class="kp-status" id="kp-status-{{ kp.id }}">—</span>
           </div>
         {% endfor %}
       </div>
     </div>
 
-    <!-- 메모 + 저장 -->
     <div class="panel-bottom">
       <div class="panel-section">
         <label class="muted" style="font-size:11px">메모</label>
@@ -92,25 +108,20 @@ body { overflow: hidden; }
         <button class="btn-primary full-width" onclick="saveAnnotation(true)" id="btn-save-bottom">
           💾 저장 + 다음 (Enter)
         </button>
-        <div id="save-status" style="text-align:center; font-size:12px; margin-top:6px; height:16px"></div>
+        <div id="save-status" style="text-align:center; font-size:12px; margin-top:6px; min-height:16px"></div>
       </div>
 
       <div class="shortcut-help">
         <b>단축키</b><br>
-        <span>Enter</span> 저장+다음 &nbsp;
-        <span>Tab</span> 다음 키포인트<br>
-        <span>R</span> 현재kp 삭제 &nbsp;
-        <span>F</span> 화면 맞춤<br>
-        <span>B</span> BBox모드 &nbsp;
-        <span>← →</span> 이전/다음 프레임<br>
-        <span>1~9</span> 키포인트 선택 &nbsp;
-        우클릭 occluded
+        <span>Enter</span> 저장+다음 &nbsp; <span>C</span> 이전복사<br>
+        <span>Tab</span> 다음kp &nbsp; <span>X</span> 건너뛰기(가림)<br>
+        <span>R</span> 현재삭제 &nbsp; <span>F</span> 화면맞춤<br>
+        <span>← →</span> 이전/다음 프레임 &nbsp; <span>1~8</span> kp선택
       </div>
     </div>
   </div>
 </div>
 
-<!-- 숨김 데이터 -->
 <script>
 const FRAME_ID        = {{ frame.id }};
 const VIDEO_ID        = {{ frame.video_id }};
@@ -119,10 +130,12 @@ const IMG_W           = {{ frame.width  or 1920 }};
 const IMG_H           = {{ frame.height or 1080 }};
 const SCHEMA          = {{ schema      | tojson }};
 const CONNECTIONS     = {{ connections | tojson }};
-const EXISTING        = {{ (existing.keypoints if existing else 'null') | safe }};
-const EXISTING_BBOX   = {{ (existing.bbox      if existing else 'null') | safe }};
-const EXISTING_NOTES  = {{ (existing.notes     if existing else '""')   | tojson }};
+const REQUIRED_KPS    = {{ required_kps | tojson }};
+const EXISTING        = {% if existing and existing.keypoints %}{{ existing.keypoints | tojson }}{% else %}null{% endif %};
+const EXISTING_BBOX   = {% if existing and existing.bbox %}{{ existing.bbox | tojson }}{% else %}null{% endif %};
+const EXISTING_NOTES  = {{ (existing.notes if existing else "") | tojson }};
 const NEXT_ID         = {{ next_id or 'null' }};
+const PREV_ID         = {{ prev_id or 'null' }};
 </script>
 {% endblock %}
 {% block scripts %}

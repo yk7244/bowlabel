@@ -1,0 +1,4 @@
+flask>=3.0
+flask-socketio>=5.3
+werkzeug>=3.0
+opencv-python>=4.8

@@ -10,7 +10,8 @@ from flask_socketio import SocketIO, emit
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 
-from database import get_db, init_db, seed_admin, DEFAULT_VIOLIN_SCHEMA, SKELETON_CONNECTIONS
+from database import (get_db, init_db, seed_admin, DEFAULT_VIOLIN_SCHEMA,
+                      SKELETON_CONNECTIONS, GROUP_LABELS, REQUIRED_KEYPOINTS)
 from extractor import allowed_video, get_video_info, extract_frames_async, UPLOADS_DIR, FRAMES_DIR
 from exporter  import export_coco, export_yolo_pose, export_csv, EXPORTS_DIR
 
@@ -148,7 +149,9 @@ def create_project():
         conn.commit(); conn.close()
         return redirect(url_for("admin_dashboard"))
     return render_template("create_project.html",
-                           default_schema=json.dumps(DEFAULT_VIOLIN_SCHEMA, indent=2, ensure_ascii=False))
+                           default_schema=json.dumps(DEFAULT_VIOLIN_SCHEMA, indent=2, ensure_ascii=False),
+                           schema_preview=DEFAULT_VIOLIN_SCHEMA,
+                           required_kps=REQUIRED_KEYPOINTS)
 
 @app.route("/admin/projects/<int:pid>")
 @login_required
@@ -365,6 +368,29 @@ def review_frame(frame_id):
 
 # ── labeler ───────────────────────────────────────────────────────────────────
 
+@app.route("/labeler/claim", methods=["POST"])
+@login_required
+def claim_next_frame():
+    """배정된 작업 중 다음 미완료 프레임 하나를 가져와 바로 어노테이션으로 이동"""
+    uid = session["user_id"]
+    conn = get_db()
+    row = conn.execute("""
+        SELECT id FROM frames
+        WHERE assigned_to=? AND status IN ('unlabeled','in_progress')
+        ORDER BY
+          CASE status WHEN 'in_progress' THEN 0 ELSE 1 END,
+          id ASC
+        LIMIT 1
+    """, (uid,)).fetchone()
+    if row:
+        conn.execute("UPDATE frames SET status='in_progress' WHERE id=? AND status='unlabeled'",
+                     (row["id"],))
+        conn.commit()
+    conn.close()
+    if not row:
+        return jsonify({"error": "배정된 작업이 없습니다."}), 404
+    return jsonify({"frame_id": row["id"], "url": url_for("annotate", frame_id=row["id"])})
+
 @app.route("/labeler")
 @login_required
 def labeler_dashboard():
@@ -387,8 +413,10 @@ def labeler_dashboard():
         "SELECT COUNT(*) FROM frames WHERE assigned_to=?", (uid,)
     ).fetchone()[0]
     conn.close()
+    in_progress = sum(1 for t in tasks if t["status"] == "in_progress")
     return render_template("labeler_dashboard.html",
                            tasks=tasks, done_count=done, total_count=total,
+                           in_progress_count=in_progress,
                            username=session["username"])
 
 # ── annotate ──────────────────────────────────────────────────────────────────
@@ -428,6 +456,8 @@ def annotate(frame_id):
                            frame=frame,
                            schema=json.loads(frame["keypoint_schema"]),
                            connections=SKELETON_CONNECTIONS,
+                           group_labels=GROUP_LABELS,
+                           required_kps=REQUIRED_KEYPOINTS,
                            existing=dict(existing) if existing else None,
                            prev_id=prev_f["id"] if prev_f else None,
                            next_id=next_f["id"] if next_f else None)
@@ -442,7 +472,28 @@ def save_annotation():
     bbox, notes   = d.get("bbox"), d.get("notes","")
     uid = session["user_id"]
     conn = get_db()
-    pid = conn.execute("SELECT project_id FROM frames WHERE id=?", (frame_id,)).fetchone()["project_id"]
+
+    frame = conn.execute("""
+        SELECT f.*, p.keypoint_schema
+        FROM frames f JOIN projects p ON p.id=f.project_id
+        WHERE f.id=?
+    """, (frame_id,)).fetchone()
+    if not frame:
+        conn.close(); return jsonify({"error": "Frame not found"}), 404
+    if session.get("role") != "admin" and frame["assigned_to"] != uid:
+        conn.close(); return jsonify({"error": "Forbidden"}), 403
+
+    schema = json.loads(frame["keypoint_schema"])
+    missing = []
+    for req_name in REQUIRED_KEYPOINTS:
+        req_id = next((s["id"] for s in schema if s["name"] == req_name), None)
+        if req_id is None:
+            continue
+        kp = next((k for k in kps if k.get("kp_id") == req_id), None)
+        if not kp or kp.get("visible", 0) == 0:
+            missing.append(req_name)
+
+    pid = frame["project_id"]
     ex  = conn.execute("SELECT id FROM annotations WHERE frame_id=? AND labeled_by=?", (frame_id, uid)).fetchone()
     payload = (json.dumps(kps), json.dumps(bbox) if bbox else None, notes)
     if ex:
@@ -451,10 +502,53 @@ def save_annotation():
     else:
         conn.execute("INSERT INTO annotations (frame_id,project_id,labeled_by,keypoints,bbox,notes) VALUES (?,?,?,?,?,?)",
                      (frame_id, pid, uid, *payload))
-    conn.execute("UPDATE frames SET status='labeled',labeled_by=?,labeled_at=datetime('now') WHERE id=?",
-                 (uid, frame_id))
+
+    new_status = "labeled" if not missing else "in_progress"
+    conn.execute("UPDATE frames SET status=?,labeled_by=?,labeled_at=datetime('now') WHERE id=?",
+                 (new_status, uid, frame_id))
     conn.commit(); conn.close()
-    return jsonify({"status": "saved"})
+    return jsonify({"status": new_status, "missing": missing})
+
+@app.route("/api/annotations/prev/<int:frame_id>")
+@login_required
+def get_prev_annotation(frame_id):
+    """이전 프레임 어노테이션 — 복사용"""
+    conn = get_db()
+    cur = conn.execute("SELECT video_id, frame_index FROM frames WHERE id=?", (frame_id,)).fetchone()
+    if not cur:
+        conn.close(); return jsonify(None)
+    prev = conn.execute("""
+        SELECT a.keypoints, a.bbox, a.notes
+        FROM frames f
+        JOIN annotations a ON a.frame_id=f.id
+        WHERE f.video_id=? AND f.frame_index < ?
+        ORDER BY f.frame_index DESC LIMIT 1
+    """, (cur["video_id"], cur["frame_index"])).fetchone()
+    conn.close()
+    if not prev:
+        return jsonify(None)
+    d = dict(prev)
+    d["keypoints"] = json.loads(d["keypoints"])
+    if d.get("bbox"):
+        d["bbox"] = json.loads(d["bbox"])
+    return jsonify(d)
+
+@app.route("/api/frames/<int:frame_id>/start", methods=["POST"])
+@login_required
+def start_frame(frame_id):
+    """어노테이션 시작 시 in_progress로 표시"""
+    uid = session["user_id"]
+    conn = get_db()
+    frame = conn.execute("SELECT assigned_to, status FROM frames WHERE id=?", (frame_id,)).fetchone()
+    if not frame:
+        conn.close(); return jsonify({"error": "not found"}), 404
+    if session.get("role") != "admin" and frame["assigned_to"] != uid:
+        conn.close(); return jsonify({"error": "forbidden"}), 403
+    if frame["status"] == "unlabeled":
+        conn.execute("UPDATE frames SET status='in_progress' WHERE id=?", (frame_id,))
+        conn.commit()
+    conn.close()
+    return jsonify({"status": "in_progress"})
 
 @app.route("/api/annotations/<int:frame_id>")
 @login_required

@@ -3,7 +3,35 @@
 {% block content %}
 <div class="page-header">
   <h2>관리자 대시보드</h2>
-  <a href="{{ url_for('create_project') }}" class="btn-primary">+ 새 프로젝트</a>
+  <div class="page-header-actions">
+    <a href="{{ url_for('create_project') }}" class="btn-primary">+ 새 프로젝트</a>
+  </div>
+</div>
+
+<!-- KPI -->
+<div class="kpi-grid">
+  <div class="kpi-card accent-blue">
+    <div class="kpi-label">전체 프레임</div>
+    <div class="kpi-value">{{ total_frames }}</div>
+    <div class="kpi-sub">추출된 프레임 수</div>
+  </div>
+  <div class="kpi-card accent-green">
+    <div class="kpi-label">라벨링 완료</div>
+    <div class="kpi-value">{{ labeled_frames }}</div>
+    <div class="kpi-sub">
+      {% if total_frames > 0 %}{{ ((labeled_frames / total_frames) * 100)|int }}% 진행{% else %}—{% endif %}
+    </div>
+  </div>
+  <div class="kpi-card accent-warn">
+    <div class="kpi-label">미완료</div>
+    <div class="kpi-value">{{ total_frames - labeled_frames }}</div>
+    <div class="kpi-sub">배분 필요</div>
+  </div>
+  <div class="kpi-card accent-red">
+    <div class="kpi-label">활성 라벨러</div>
+    <div class="kpi-value">{{ users | selectattr('is_active') | selectattr('role', 'equalto', 'labeler') | list | length }}</div>
+    <div class="kpi-sub">등록된 계정</div>
+  </div>
 </div>
 
 <!-- Projects -->
@@ -14,11 +42,11 @@
     {% for p in projects %}
     <a class="card project-card" href="{{ url_for('project_detail', pid=p.id) }}">
       <div class="card-title">{{ p.name }}</div>
-      <div class="card-meta">{{ p.description or '' }}</div>
+      <div class="card-meta">{{ p.description or '설명 없음' }}</div>
       <div class="card-stats">
-        <span>📹 영상 {{ p.video_count }}</span>
-        <span>🖼️ 프레임 {{ p.frame_count }}</span>
-        <span>✅ 완료 {{ p.labeled_count or 0 }}</span>
+        <span>📹 {{ p.video_count or 0 }} 영상</span>
+        <span>🖼️ {{ p.frame_count or 0 }} 프레임</span>
+        <span>✅ {{ p.labeled_count or 0 }} 완료</span>
       </div>
       {% if p.frame_count and p.frame_count > 0 %}
       <div class="progress-bar">
@@ -27,13 +55,17 @@
       </div>
       <div class="progress-text">
         {{ ((p.labeled_count or 0) / p.frame_count * 100)|int }}% 완료
+        {% if p.reviewed_count %} · 검수 {{ p.reviewed_count }}{% endif %}
       </div>
       {% endif %}
     </a>
     {% endfor %}
   </div>
   {% else %}
-  <div class="empty-state">프로젝트가 없습니다. 새 프로젝트를 만들어보세요.</div>
+  <div class="empty-state">
+    <div class="empty-icon">📁</div>
+    <p>프로젝트가 없어. 새 프로젝트 만들어봐.</p>
+  </div>
   {% endif %}
 </section>
 
@@ -51,9 +83,9 @@
         {% for u in users %}
         <tr class="{{ 'inactive' if not u.is_active }}">
           <td>{{ u.id }}</td>
-          <td>{{ u.username }}</td>
+          <td><strong>{{ u.username }}</strong></td>
           <td><span class="badge {{ 'badge-admin' if u.role == 'admin' else 'badge-labeler' }}">{{ u.role }}</span></td>
-          <td>{{ u.labeled_count }}</td>
+          <td>{{ u.labeled_count or 0 }}</td>
           <td><span class="badge {{ 'badge-on' if u.is_active else 'badge-off' }}">
             {{ '활성' if u.is_active else '비활성' }}</span></td>
           <td class="action-btns">
@@ -70,13 +102,12 @@
     </table>
   </div>
 
-  <!-- Add user form -->
   <div class="inline-form">
     <h4>새 라벨러 추가</h4>
     <form method="post" action="{{ url_for('add_user') }}" class="form-row">
-      <input type="text" name="username" placeholder="아이디" required>
-      <input type="password" name="password" placeholder="비밀번호" required>
-      <select name="role">
+      <input type="text" name="username" placeholder="아이디" required style="width:160px">
+      <input type="password" name="password" placeholder="비밀번호" required style="width:160px">
+      <select name="role" style="width:120px">
         <option value="labeler">라벨러</option>
         <option value="admin">관리자</option>
       </select>
@@ -85,7 +116,6 @@
   </div>
 </section>
 
-<!-- Reset PW modal -->
 <div id="modal-reset-pw" class="modal hidden">
   <div class="modal-box">
     <h4 id="modal-reset-title">비밀번호 변경</h4>
