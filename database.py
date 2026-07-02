@@ -195,15 +195,19 @@ def coco_visibility(v: int) -> int:
 
 
 def annotation_complete(keypoints: list, bbox: dict, n_kp: int = 9):
-    """9점 모두 처리됐는지 + bbox 유효 여부. missing = 미처리 kp name 목록"""
+    """All 9 kps addressed (visible needs coords; occluded/outside ok without). bbox required."""
     missing = []
+    if len(keypoints) < n_kp:
+        missing.append("__keypoints__")
     for kp in keypoints:
         vis = kp.get("visible", VIS_UNSET)
+        kp_id = str(kp.get("kp_id", "?"))
         if vis == VIS_UNSET:
-            missing.append(kp.get("name") or str(kp.get("kp_id")))
+            missing.append(kp_id)
         elif vis == VIS_VISIBLE:
-            if kp.get("x") is None or kp.get("y") is None:
-                missing.append(kp.get("name") or str(kp.get("kp_id")))
-    if not bbox or bbox.get("w", 0) <= 0 or bbox.get("h", 0) <= 0:
+            x, y = kp.get("x"), kp.get("y")
+            if x is None or y is None:
+                missing.append(kp_id)
+    if not bbox or not bbox.get("w") or not bbox.get("h"):
         missing.append("__bbox__")
     return len(missing) == 0, missing

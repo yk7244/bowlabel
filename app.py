@@ -598,6 +598,13 @@ def annotate(frame_id):
     next_id = _neighbor_frame(conn, frame["video_id"], frame["frame_index"], uid, role, "next")
     conn.close()
 
+    existing_parsed = None
+    if existing:
+        existing_parsed = dict(existing)
+        existing_parsed["keypoints"] = json.loads(existing["keypoints"])
+        if existing_parsed.get("bbox"):
+            existing_parsed["bbox"] = json.loads(existing_parsed["bbox"])
+
     return render_template("annotate.html",
                            frame=frame,
                            assignment=dict(assignment) if assignment else None,
@@ -606,7 +613,7 @@ def annotate(frame_id):
                            group_labels=GROUP_LABELS,
                            class_name=frame["class_name"],
                            quality_options=QUALITY_OPTIONS,
-                           existing=dict(existing) if existing else None,
+                           existing=existing_parsed,
                            prev_id=prev_id, next_id=next_id)
 
 
@@ -668,10 +675,17 @@ def save_annotation():
     for m in missing:
         if m == "__bbox__":
             miss_names.append("bbox")
+        elif m == "__keypoints__":
+            miss_names.append("keypoints")
         else:
-            miss_names.append(id_to_name.get(int(m), m) if m.isdigit() else m)
+            miss_names.append(id_to_name.get(int(m), m) if str(m).isdigit() else m)
 
-    return jsonify({"status": new_status, "missing": miss_names, "complete": complete})
+    return jsonify({
+        "saved": True,
+        "status": new_status,
+        "complete": complete,
+        "missing": miss_names,
+    })
 
 
 @app.route("/api/annotations/prev/<int:frame_id>")

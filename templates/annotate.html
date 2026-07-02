@@ -1,20 +1,30 @@
 {% extends "base.html" %}
-{% block title %}라벨링 — #{{ frame.frame_index }}{% endblock %}
+{% block title %}Label — #{{ frame.frame_index }}{% endblock %}
 {% block head %}
 <style>
 body { overflow: hidden; }
 .main-content { padding: 0; max-width: none; height: calc(100vh - 52px); display: flex; flex-direction: column; }
 .annotate-body { display: flex; flex: 1; overflow: hidden; }
-.annotate-panel { width: 330px; }
-.vis-badge { font-size: 11px; padding: 2px 8px; border-radius: 4px; display: inline-block; margin-top: 4px; }
+.annotate-panel { width: 320px; }
+.vis-badge { font-size: 11px; padding: 2px 8px; border-radius: 4px; display: inline-block; margin-top: 4px; font-family: monospace; }
 .vis-0 { background: #333; color: #888; }
 .vis-1 { background: #555520; color: #fbbf24; }
 .vis-2 { background: #1a4030; color: #34d399; }
 .vis-3 { background: #2a2a40; color: #8888aa; }
 .vis-btns { display: flex; gap: 4px; margin-top: 8px; }
-.vis-btns button { flex: 1; font-size: 11px; padding: 6px 4px; }
+.vis-btns button { flex: 1; font-size: 11px; padding: 6px 4px; font-family: monospace; }
 .batch-pilot { color: #a78bfa; }
 .batch-main { color: var(--accent2); }
+.zoom-bar { display: flex; gap: 4px; align-items: center; margin-top: 6px; }
+.zoom-bar button { min-width: 32px; }
+.save-status.status-ok { color: var(--green); }
+.save-status.status-warn { color: var(--warn); }
+.save-status.status-error { color: var(--red); }
+.canvas-toolbar {
+  position: absolute; bottom: 12px; left: 12px; z-index: 5;
+  display: flex; gap: 6px; background: rgba(0,0,0,0.65);
+  padding: 6px 8px; border-radius: 8px; font-size: 11px; color: #aaa;
+}
 </style>
 {% endblock %}
 {% block content %}
@@ -23,31 +33,36 @@ body { overflow: hidden; }
   <div class="topbar-info">
     <span class="project-badge">{{ class_name }}</span>
     <span class="badge {{ 'batch-pilot' if frame.batch_type=='pilot' else 'batch-main' }}">
-      {{ 'PILOT' if frame.batch_type=='pilot' else 'MAIN' }}
+      {{ frame.batch_type|upper }}
     </span>
-    <span class="muted">#{{ frame.frame_index }} · {{ "%.2f"|format(frame.timestamp_sec or 0) }}s</span>
+    <span class="muted">#{{ frame.frame_index }}</span>
+    <span id="save-hint" class="muted" style="font-size:11px"></span>
   </div>
   <div class="topbar-progress">
     <span id="kp-progress-label" class="muted" style="font-size:11px">0/9</span>
-    <span id="bbox-status" class="muted" style="font-size:11px;margin-left:8px">bbox 필요</span>
-    <div class="progress-bar progress-bar-sm" style="width:120px;margin-left:8px">
+    <span id="bbox-status" class="muted" style="font-size:11px;margin-left:8px">bbox needed</span>
+    <div class="progress-bar progress-bar-sm" style="width:100px;margin-left:6px">
       <div class="progress-fill" id="kp-progress-bar"></div>
     </div>
   </div>
   <div class="topbar-nav">
     {% if prev_id %}<a href="{{ url_for('annotate', frame_id=prev_id) }}" class="btn-sm btn-secondary">◀</a>
     {% else %}<button class="btn-sm btn-secondary" disabled>◀</button>{% endif %}
-    {% if next_id %}<a href="{{ url_for('annotate', frame_id=next_id) }}" class="btn-sm btn-secondary" id="btn-next">▶</a>
-    {% else %}<button class="btn-sm btn-secondary" disabled>▶</button>{% endif %}
-    <button class="btn-sm btn-secondary" onclick="copyFromPrev()">복사</button>
-    <button class="btn-sm btn-primary" onclick="saveAnnotation(true)">저장</button>
+    <button class="btn-sm btn-secondary" onclick="goNext()" title="Save & next">▶</button>
+    <button class="btn-sm btn-secondary" onclick="copyFromPrev()">Copy</button>
+    <button class="btn-sm btn-primary" onclick="saveAnnotation(false)">Save</button>
   </div>
 </div>
 
 <div class="annotate-body">
-  <div class="annotate-canvas-wrap" id="canvas-wrap">
+  <div class="annotate-canvas-wrap" id="canvas-wrap" style="position:relative">
     <canvas id="canvas"></canvas>
-    <div id="canvas-hint" class="canvas-hint"></div>
+    <div class="canvas-toolbar">
+      <button class="btn-sm btn-secondary" onclick="zoomButton(-1)">−</button>
+      <button class="btn-sm btn-secondary" onclick="zoomButton(1)">+</button>
+      <button class="btn-sm btn-secondary" onclick="fitToCanvas(); redraw();">Fit</button>
+      <span>Space/Alt+drag pan · Shift+wheel h-scroll</span>
+    </div>
   </div>
 
   <div class="annotate-panel">
@@ -56,34 +71,31 @@ body { overflow: hidden; }
       <div class="kp-current-name" id="kp-current-name">—</div>
       <div class="kp-current-sub muted" id="kp-current-sub" style="font-size:10px;font-family:monospace"></div>
       <div class="kp-current-desc" id="kp-current-desc" style="font-size:12px;margin-top:6px"></div>
-      <span class="vis-badge vis-0" id="kp-current-vis">미처리</span>
+      <span class="vis-badge vis-0" id="kp-current-vis">unset</span>
       <div class="vis-btns">
-        <button class="btn-sm btn-secondary" onclick="setVisState(2)" title="V">가시</button>
-        <button class="btn-sm btn-secondary" onclick="setVisState(1)" title="O">가림</button>
-        <button class="btn-sm btn-secondary" onclick="setVisState(3)" title="U">밖</button>
+        <button class="btn-sm btn-secondary" onclick="setVisState(2)" title="V">visible</button>
+        <button class="btn-sm btn-secondary" onclick="setVisState(1)" title="O">occluded</button>
+        <button class="btn-sm btn-secondary" onclick="setVisState(3)" title="U">outside</button>
       </div>
     </div>
 
     <div class="panel-section panel-compact">
       <div class="mode-btns">
-        <button class="mode-btn active" id="mode-kp" onclick="setMode('keypoint')">9 키포인트</button>
+        <button class="mode-btn active" id="mode-kp" onclick="setMode('keypoint')">keypoints</button>
         <button class="mode-btn" id="mode-bbox" onclick="setMode('bbox')">bbox</button>
       </div>
-      <div class="hint-text" id="mode-hint">클릭=가시 · 우클릭=가림 · U=프레임밖</div>
-      <p class="hint-text" style="margin-top:6px;color:var(--warn)">
-        bbox = 9점 + 보이는 활 전체 포함. 안 보이는 점은 추측 금지.
-      </p>
+      <div class="hint-text" id="mode-hint">Click=visible · Right-click=occluded · U=outside</div>
     </div>
 
     <div class="panel-section panel-compact">
       <div class="group-filter-row">
-        <button class="btn-sm btn-secondary group-filter-btn active" data-group="all" onclick="setGroupFilter('all')">전체</button>
+        <button class="btn-sm btn-secondary group-filter-btn active" data-group="all" onclick="setGroupFilter('all')">all</button>
         {% set ng = namespace(seen=[]) %}
         {% for kp in schema %}
           {% if kp.group not in ng.seen %}
             {% set ng.seen = ng.seen + [kp.group] %}
             <button class="btn-sm btn-secondary group-filter-btn" data-group="{{ kp.group }}"
-                    onclick="setGroupFilter('{{ kp.group }}')">{{ group_labels.get(kp.group, kp.group) }}</button>
+                    onclick="setGroupFilter('{{ kp.group }}')">{{ kp.group }}</button>
           {% endif %}
         {% endfor %}
       </div>
@@ -96,16 +108,15 @@ body { overflow: hidden; }
         {% for kp in schema %}
           {% if kp.group != ns.g %}
             {% set ns.g = kp.group %}
-            <div class="kp-group-header">{{ group_labels.get(kp.group, kp.group) }}</div>
+            <div class="kp-group-header">{{ kp.group }}</div>
           {% endif %}
           <div class="kp-item" id="kp-item-{{ kp.id }}" onclick="selectKP({{ loop.index0 }})">
             <span class="kp-idx muted">{{ loop.index }}</span>
-            <span class="kp-dot" style="background:{{ kp.color }};color:{{ kp.color }}"></span>
+            <span class="kp-dot" style="background:{{ kp.color }}"></span>
             <div class="kp-item-text">
-              <span class="kp-label">{{ kp.label_short }}</span>
-              <span class="kp-name-sub">{{ kp.name }}</span>
+              <span class="kp-label">{{ kp.name }}</span>
             </div>
-            <span class="kp-status" id="kp-status-{{ kp.id }}">—</span>
+            <span class="kp-status" id="kp-status-{{ kp.id }}">unset</span>
           </div>
         {% endfor %}
       </div>
@@ -113,23 +124,23 @@ body { overflow: hidden; }
 
     <div class="panel-bottom">
       <div class="panel-section panel-compact">
-        <label class="muted" style="font-size:11px">품질 태그</label>
+        <label class="muted" style="font-size:11px">quality</label>
         <select id="quality" style="width:100%;margin-top:4px;font-size:12px">
-          <option value="">— 선택 —</option>
+          <option value="">—</option>
           {% for val, lbl in quality_options %}
-          <option value="{{ val }}">{{ lbl }}</option>
+          <option value="{{ val }}">{{ val }}</option>
           {% endfor %}
         </select>
       </div>
       <div class="panel-section panel-compact">
-        <textarea id="notes" rows="2" placeholder="메모" style="width:100%;resize:none;font-size:12px"></textarea>
+        <textarea id="notes" rows="2" placeholder="notes" style="width:100%;resize:none;font-size:12px"></textarea>
       </div>
       <div class="panel-section panel-compact">
-        <button class="btn-primary full-width" onclick="saveAnnotation(true)">저장 + 다음 (Enter)</button>
+        <button class="btn-primary full-width" onclick="saveAnnotation(true)">Save + Next (Enter)</button>
         <div id="save-status" class="save-status"></div>
       </div>
       <div class="shortcut-help">
-        V/O/U 가시·가림·밖 · B bbox · C 복사 · 1-9,0 포인트
+        V/O/U · B bbox · C copy · R reset kp · Space/Alt pan · +/− zoom
       </div>
     </div>
   </div>
@@ -143,6 +154,7 @@ const IMG_H    = {{ frame.height or 1080 }};
 const SCHEMA   = {{ schema | tojson }};
 const CONNECTIONS = {{ connections | tojson }};
 const EXISTING = {% if existing %}{{ existing | tojson }}{% else %}null{% endif %};
+const EXISTING_KEYPOINTS = {% if existing and existing.keypoints %}{{ existing.keypoints | tojson }}{% else %}null{% endif %};
 const EXISTING_BBOX   = {% if existing and existing.bbox %}{{ existing.bbox | tojson }}{% else %}null{% endif %};
 const EXISTING_NOTES  = {{ (existing.notes if existing else "") | tojson }};
 const EXISTING_QUALITY = {{ (existing.quality if existing else "") | tojson }};
@@ -151,5 +163,5 @@ const PREV_ID = {{ prev_id or 'null' }};
 </script>
 {% endblock %}
 {% block scripts %}
-<script src="{{ url_for('static', filename='js/annotate.js') }}"></script>
+<script src="{{ url_for('static', filename='js/annotate.js') }}?v=32"></script>
 {% endblock %}

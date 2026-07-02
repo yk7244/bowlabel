@@ -56,5 +56,11 @@ python3 app.py
 | 클릭 | visible |
 | 우클릭 / O | occluded |
 | U | outside |
+| R | 선택 keypoint 리셋 |
 | C | 이전 프레임 복사 |
-| Enter | 저장 |
+| Space / Alt + 드래그 | 팬 |
+| Shift + 휠 | 가로 스크롤 |
+| + / − / F | 줌 / 화면 맞춤 |
+| Enter / ▶ | 저장 (미완성 시 확인 후 다음) |
+
+자세한 변경 이력은 [CHANGELOG.md](CHANGELOG.md) 참고.
