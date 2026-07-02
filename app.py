@@ -1,7 +1,7 @@
 """
 app.py - BowLabel v3: master 9-keypoint annotation
 """
-import json, os, sys, uuid
+import json, os, sys, uuid, sqlite3, time
 from pathlib import Path
 from functools import wraps
 from flask import (Flask, render_template, request, redirect, url_for,
@@ -633,11 +633,18 @@ def save_annotation():
         return jsonify({"error": "Forbidden"}), 403
 
     conn = get_db()
-    frame = conn.execute("""
-        SELECT f.project_id, p.keypoint_schema FROM frames f
-        JOIN projects p ON p.id=f.project_id WHERE f.id=?
-    """, (frame_id,)).fetchone()
-    schema = json.loads(frame["keypoint_schema"])
+    try:
+        frame = conn.execute("""
+            SELECT f.project_id, p.keypoint_schema FROM frames f
+            JOIN projects p ON p.id=f.project_id WHERE f.id=?
+        """, (frame_id,)).fetchone()
+        if not frame:
+            return jsonify({"error": "Frame not found"}), 404
+        schema = json.loads(frame["keypoint_schema"])
+        project_id = frame["project_id"]
+    finally:
+        conn.close()
+
     n_kp = len(schema)
 
     # kp_id 순서 정렬 보장
@@ -646,29 +653,44 @@ def save_annotation():
 
     payload_kps = json.dumps(kps_sorted)
     payload_bbox = json.dumps(bbox) if bbox else None
-
-    ex = conn.execute(
-        "SELECT id FROM annotations WHERE frame_id=? AND labeled_by=?", (frame_id, uid)
-    ).fetchone()
-    if ex:
-        conn.execute("""
-            UPDATE annotations SET keypoints=?,bbox=?,quality=?,notes=?,updated_at=datetime('now')
-            WHERE id=?
-        """, (payload_kps, payload_bbox, quality, notes, ex["id"]))
-    else:
-        conn.execute("""
-            INSERT INTO annotations (frame_id,project_id,labeled_by,keypoints,bbox,quality,notes)
-            VALUES (?,?,?,?,?,?,?)
-        """, (frame_id, frame["project_id"], uid, payload_kps, payload_bbox, quality, notes))
-
     new_status = "labeled" if complete else "in_progress"
-    conn.execute("""
-        UPDATE frame_assignments SET status=?, labeled_at=datetime('now')
-        WHERE frame_id=? AND user_id=?
-    """, (new_status, frame_id, uid))
 
-    conn.commit()
-    conn.close()
+    last_err = None
+    for attempt in range(5):
+        conn = None
+        try:
+            conn = get_db()
+            conn.execute("""
+                INSERT INTO annotations (frame_id, project_id, labeled_by, keypoints, bbox, quality, notes)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(frame_id, labeled_by) DO UPDATE SET
+                    keypoints=excluded.keypoints,
+                    bbox=excluded.bbox,
+                    quality=excluded.quality,
+                    notes=excluded.notes,
+                    updated_at=datetime('now')
+            """, (frame_id, project_id, uid, payload_kps, payload_bbox, quality, notes))
+            conn.execute("""
+                UPDATE frame_assignments SET status=?, labeled_at=datetime('now')
+                WHERE frame_id=? AND user_id=?
+            """, (new_status, frame_id, uid))
+            conn.commit()
+            last_err = None
+            break
+        except sqlite3.OperationalError as e:
+            last_err = e
+            if conn:
+                conn.rollback()
+            if "locked" in str(e).lower() and attempt < 4:
+                time.sleep(0.05 * (2 ** attempt))
+                continue
+            raise
+        finally:
+            if conn:
+                conn.close()
+
+    if last_err:
+        return jsonify({"error": str(last_err)}), 500
 
     miss_names = []
     id_to_name = {s["id"]: s.get("label_short", s["name"]) for s in schema}

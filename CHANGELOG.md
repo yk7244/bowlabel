@@ -4,6 +4,52 @@
 
 ---
 
+## 2026-07-02 — v3.2 저장 버그·bbox 핸들·줌 조정
+
+**커밋:** `저장 race condition 수정, bbox 꼭지점 조정, 줌 속도 상향`
+
+### 배경 (문제)
+
+- 다른 PC에서 라벨러 저장 시 `UNIQUE constraint failed: annotations.frame_id, labeled_by` → 연쇄 `database is locked`
+- bbox 그린 뒤 꼭지점으로 미세 조정 불가
+- 줌이 v3.1 기준으로 다소 느림
+
+### 원인
+
+1. **저장 race condition** — 동시에 두 번 저장 요청이 오면 둘 다 `SELECT`에서 row 없음 → 둘 다 `INSERT` 시도 → UNIQUE 실패
+2. 실패 후 프론트가 연속 재시도 → SQLite lock 폭주
+3. bbox는 드래그로만 생성, 이후 resize 없음
+
+### 수정
+
+#### `app.py`
+
+- `INSERT ... ON CONFLICT(frame_id, labeled_by) DO UPDATE` — atomic upsert
+- `database is locked` 시 최대 5회 exponential backoff 재시도
+
+#### `database.py`
+
+- `timeout=30`, `PRAGMA busy_timeout=30000` — 다중 라벨러 동시 접속 완화
+
+#### `static/js/annotate.js` (v3.2)
+
+- `saveInFlight` mutex — 동시 저장 요청 1개로 합침
+- HTTP非200 응답 시 명확한 에러 메시지
+- bbox **4꼭지점 핸들** 드래그로 resize
+- bbox **내부 드래그**로 이동
+- 줌: `WHEEL_ZOOM_SENS` 0.0018 → 0.0026, 버튼 줌 1.06x / 0.94x
+
+### bbox 사용법
+
+```
+B → bbox 모드
+드래그        → 새 bbox
+꼭지점 드래그  → 크기 조정
+내부 드래그    → 위치 이동
+```
+
+---
+
 ## 2026-07-02 — v3.1 라벨링 UX 버그 수정
 
 **커밋:** `라벨링 UX 버그 수정 — 저장/줌/팬/좌표 클러스터`

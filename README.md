@@ -52,7 +52,7 @@ python3 app.py
 
 | 키 | 동작 |
 |----|------|
-| B | bbox 모드 |
+| B | bbox 모드 (꼭지점 드래그=크기, 내부 드래그=이동) |
 | 클릭 | visible |
 | 우클릭 / O | occluded |
 | U | outside |

@@ -1,5 +1,5 @@
 /**
- * annotate.js v3.1 — labeling UX fixes
+ * annotate.js v3.2 — save mutex, bbox handles, zoom tune
  * visibility: 0=unset  1=occluded  2=visible  3=outside
  * Space+drag / middle-click = pan · slower wheel zoom
  */
@@ -14,9 +14,13 @@ const POINT_SELECTED = 12;
 const HIT_RADIUS     = 16;
 const MIN_SCALE      = 0.15;
 const MAX_SCALE      = 18;
-const ZOOM_IN        = 1.04;
-const ZOOM_OUT       = 0.96;
-const WHEEL_ZOOM_SENS = 0.0018;
+const ZOOM_IN        = 1.06;
+const ZOOM_OUT       = 0.94;
+const WHEEL_ZOOM_SENS = 0.0026;
+const BBOX_HANDLE_R  = 7;
+const BBOX_HANDLE_HIT = 14;
+const BBOX_OPPOSITE  = {tl: 'br', tr: 'bl', bl: 'tr', br: 'tl'};
+const BBOX_CURSORS   = {tl: 'nwse-resize', br: 'nwse-resize', tr: 'nesw-resize', bl: 'nesw-resize'};
 
 const canvas = document.getElementById('canvas');
 const ctx    = canvas.getContext('2d');
@@ -37,6 +41,7 @@ let spaceHeld = false;
 let scale = 1, offsetX = 0, offsetY = 0;
 let mouseImgPos = {x: 0, y: 0};
 let dirty = false;
+let saveInFlight = null;
 
 fetch(`/api/frames/${FRAME_ID}/start`, {method: 'POST'}).catch(() => {});
 
@@ -109,6 +114,51 @@ function clampImg(x, y) {
   return [Math.max(0, Math.min(IMG_W, x)), Math.max(0, Math.min(IMG_H, y))];
 }
 
+function bboxCorners(b) {
+  return {
+    tl: {x: b.x, y: b.y},
+    tr: {x: b.x + b.w, y: b.y},
+    bl: {x: b.x, y: b.y + b.h},
+    br: {x: b.x + b.w, y: b.y + b.h},
+  };
+}
+
+function bboxFromAnchor(anchor, nx, ny) {
+  const x1 = Math.min(anchor.x, nx);
+  const y1 = Math.min(anchor.y, ny);
+  const x2 = Math.max(anchor.x, nx);
+  const y2 = Math.max(anchor.y, ny);
+  return {x: x1, y: y1, w: x2 - x1, h: y2 - y1};
+}
+
+function pointInBbox(ix, iy) {
+  if (!bbox?.w || !bbox?.h) return false;
+  return ix >= bbox.x && ix <= bbox.x + bbox.w && iy >= bbox.y && iy <= bbox.y + bbox.h;
+}
+
+function getHitBboxHandle(cx, cy) {
+  if (!bbox?.w || !bbox?.h || mode !== 'bbox') return null;
+  for (const [id, pt] of Object.entries(bboxCorners(bbox))) {
+    const [hx, hy] = imgToCanvas(pt.x, pt.y);
+    if (Math.hypot(cx - hx, cy - hy) < BBOX_HANDLE_HIT) return id;
+  }
+  return null;
+}
+
+function drawBboxHandles() {
+  if (!bbox?.w || !bbox?.h || mode !== 'bbox') return;
+  Object.entries(bboxCorners(bbox)).forEach(([id, pt]) => {
+    const [hx, hy] = imgToCanvas(pt.x, pt.y);
+    ctx.fillStyle = '#00d4ff';
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(hx, hy, BBOX_HANDLE_R, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+  });
+}
+
 function fitToCanvas() {
   const wrap = document.getElementById('canvas-wrap');
   canvas.width = wrap.clientWidth;
@@ -171,6 +221,7 @@ function redraw() {
     ctx.fillStyle = 'rgba(0,212,255,0.05)';
     ctx.fillRect(bx, by, bbox.w * scale, bbox.h * scale);
     ctx.restore();
+    drawBboxHandles();
   }
 
   CONNECTIONS.forEach(([a, b]) => {
@@ -321,16 +372,36 @@ canvas.addEventListener('mousemove', e => {
   }
   if (isDragging && dragTarget?.type === 'bbox' && bboxStart) {
     const [nx, ny] = clampImg(ix, iy);
-    bbox = {
-      x: Math.min(bboxStart[0], nx), y: Math.min(bboxStart[1], ny),
-      w: Math.abs(nx - bboxStart[0]), h: Math.abs(ny - bboxStart[1]),
-    };
+    bbox = bboxFromAnchor({x: bboxStart[0], y: bboxStart[1]}, nx, ny);
+    markDirty();
+    redraw(); updateProgress(); return;
+  }
+  if (isDragging && dragTarget?.type === 'bbox-handle') {
+    const [nx, ny] = clampImg(ix, iy);
+    bbox = bboxFromAnchor(dragTarget.anchor, nx, ny);
+    markDirty();
+    redraw(); updateProgress(); return;
+  }
+  if (isDragging && dragTarget?.type === 'bbox-move') {
+    const dx = ix - dragTarget.startX;
+    const dy = iy - dragTarget.startY;
+    let nx = dragTarget.orig.x + dx;
+    let ny = dragTarget.orig.y + dy;
+    nx = Math.max(0, Math.min(IMG_W - dragTarget.orig.w, nx));
+    ny = Math.max(0, Math.min(IMG_H - dragTarget.orig.h, ny));
+    bbox = {x: nx, y: ny, w: dragTarget.orig.w, h: dragTarget.orig.h};
     markDirty();
     redraw(); updateProgress(); return;
   }
 
   if (spaceHeld) canvas.style.cursor = 'grab';
-  else if (mode === 'bbox') canvas.style.cursor = 'crosshair';
+  else if (mode === 'bbox') {
+    const handle = getHitBboxHandle(cx, cy);
+    if (handle) canvas.style.cursor = BBOX_CURSORS[handle];
+    else if (pointInBbox(ix, iy)) canvas.style.cursor = 'move';
+    else canvas.style.cursor = 'crosshair';
+    redraw();
+  }
   else canvas.style.cursor = getHitKP(cx, cy) >= 0 ? 'move' : 'crosshair';
 
   if (mode === 'keypoint') redraw();
@@ -345,6 +416,18 @@ canvas.addEventListener('mousedown', e => {
   }
 
   if (mode === 'bbox' && e.button === 0) {
+    const handle = getHitBboxHandle(cx, cy);
+    if (handle && bbox) {
+      const corners = bboxCorners(bbox);
+      isDragging = true;
+      dragTarget = {type: 'bbox-handle', corner: handle, anchor: corners[BBOX_OPPOSITE[handle]]};
+      return;
+    }
+    if (pointInBbox(ix, iy) && bbox) {
+      isDragging = true;
+      dragTarget = {type: 'bbox-move', startX: ix, startY: iy, orig: {...bbox}};
+      return;
+    }
     const [nx, ny] = clampImg(ix, iy);
     bboxStart = [nx, ny];
     bbox = {x: nx, y: ny, w: 0, h: 0};
@@ -458,7 +541,9 @@ function setMode(m) {
   document.getElementById('mode-kp')?.classList.toggle('active', m === 'keypoint');
   document.getElementById('mode-bbox')?.classList.toggle('active', m === 'bbox');
   document.getElementById('mode-hint').textContent =
-    m === 'bbox' ? 'Drag bbox · Space/Alt+drag pan' : 'Click=visible · Right-click=occluded · Space/Alt=pan';
+    m === 'bbox'
+      ? 'Drag bbox · drag corners to resize · drag inside to move · Space/Alt+drag pan'
+      : 'Click=visible · Right-click=occluded · Space/Alt=pan';
 }
 
 function resetSelectedKP() {
@@ -510,16 +595,26 @@ function buildPayload() {
 }
 
 async function saveToServer() {
-  const r = await fetch('/api/annotations', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify(buildPayload()),
-  });
-  const d = await r.json();
-  if (d.error) throw new Error(d.error);
-  dirty = false;
-  updateSaveHint();
-  return d;
+  if (saveInFlight) return saveInFlight;
+  saveInFlight = (async () => {
+    const r = await fetch('/api/annotations', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(buildPayload()),
+    });
+    let d = {};
+    try { d = await r.json(); } catch (_) {}
+    if (!r.ok) throw new Error(d.error || `Save failed (${r.status})`);
+    if (d.error) throw new Error(d.error);
+    dirty = false;
+    updateSaveHint();
+    return d;
+  })();
+  try {
+    return await saveInFlight;
+  } finally {
+    saveInFlight = null;
+  }
 }
 
 async function saveAnnotation(autoAdvance = false) {
