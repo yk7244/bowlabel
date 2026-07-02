@@ -1,23 +1,19 @@
 /**
- * annotate.js - BowLabel canvas annotation
- *
- * 핵심 UX:
- * - C: 이전 프레임 키포인트 복사 (연속 프레임 라벨링 가속)
- * - G: 그룹 모드 (bow / violin / strings 만 라벨링)
- * - X: 현재 키포인트 건너뛰기 (occluded)
- * - 필수 4개 검증 후 저장
+ * annotate.js v3 — violin_bowing_scene · 9 keypoints
+ * visibility: 2=visible  1=occluded  3=outside  0=미처리
+ * B=bbox  V/O/U=가시/가림/프레임밖  C=이전복사
  */
 
-const POINT_RADIUS   = 8;
-const POINT_SELECTED = 12;
-const HIT_RADIUS     = 16;
-const MIN_SCALE      = 0.1;
-const MAX_SCALE      = 12;
+const VIS_UNSET    = 0;
+const VIS_OCCLUDED = 1;
+const VIS_VISIBLE  = 2;
+const VIS_OUTSIDE  = 3;
 
-const GROUP_LABELS_KO = {
-  bow: '활', violin: '바이올린', strings: '현',
-  right_hand: '오른손', right_arm: '오른팔', left_arm: '왼팔',
-};
+const POINT_RADIUS   = 7;
+const POINT_SELECTED = 11;
+const HIT_RADIUS     = 15;
+const MIN_SCALE      = 0.1;
+const MAX_SCALE      = 14;
 
 const canvas = document.getElementById('canvas');
 const ctx    = canvas.getContext('2d');
@@ -25,346 +21,268 @@ const img    = new Image();
 
 let keypoints = SCHEMA.map(kp => ({
   kp_id: kp.id, name: kp.name, color: kp.color, group: kp.group,
-  desc: kp.desc || '', x: null, y: null, visible: 0
+  label_short: kp.label_short || kp.name,
+  desc: kp.desc || '',
+  x: null, y: null, visible: VIS_UNSET,
 }));
 
-let bbox         = null;
-let selectedKP   = 0;
-let mode         = 'keypoint';
-let groupFilter  = null;   // null = 전체, 'bow' = 활만 등
-let isDragging   = false;
-let dragTarget   = null;
-let bboxStart    = null;
-let isPanning    = false;
-let panStart     = null;
-let scale        = 1;
-let offsetX      = 0;
-let offsetY      = 0;
-let mouseImgPos  = {x: 0, y: 0};
+let bbox = null, selectedKP = 0, mode = 'keypoint';
+let groupFilter = null;
+let isDragging = false, dragTarget = null, bboxStart = null;
+let isPanning = false, panStart = null;
+let scale = 1, offsetX = 0, offsetY = 0;
+let mouseImgPos = {x: 0, y: 0};
 
-// ── 초기화 ────────────────────────────────────────────────
 fetch(`/api/frames/${FRAME_ID}/start`, {method: 'POST'}).catch(() => {});
 
 img.onload = () => {
   fitToCanvas();
   loadExisting();
-  const first = activeIndices().find(i => keypoints[i].visible === 0);
-  selectedKP = first !== undefined ? first : 0;
-  redraw();
-  updatePanel();
-  updateProgress();
+  selectedKP = keypoints.findIndex(k => k.visible === VIS_UNSET);
+  if (selectedKP < 0) selectedKP = 0;
+  redraw(); updatePanel(); updateProgress(); updateCurrentCard();
 };
-img.onerror = () => {
-  document.getElementById('canvas-hint').textContent = '이미지 로드 실패';
-};
+img.onerror = () => { document.getElementById('canvas-hint').textContent = '로드 실패'; };
 img.src = IMG_URL;
 
 function loadExisting() {
-  if (EXISTING && Array.isArray(EXISTING)) {
+  if (EXISTING?.keypoints) {
+    EXISTING.keypoints.forEach(e => {
+      const kp = keypoints.find(k => k.kp_id === e.kp_id);
+      if (kp) {
+        kp.x = e.x; kp.y = e.y; kp.visible = e.visible ?? VIS_UNSET;
+      }
+    });
+  } else if (Array.isArray(EXISTING)) {
     EXISTING.forEach(e => {
       const kp = keypoints.find(k => k.kp_id === e.kp_id);
-      if (kp && e.x != null) { kp.x = e.x; kp.y = e.y; kp.visible = e.visible ?? 2; }
+      if (kp) { kp.x = e.x; kp.y = e.y; kp.visible = e.visible ?? VIS_UNSET; }
     });
   }
-  if (EXISTING_BBOX)  bbox = {...EXISTING_BBOX};
+  if (EXISTING_BBOX) bbox = {...EXISTING_BBOX};
   if (EXISTING_NOTES) document.getElementById('notes').value = EXISTING_NOTES;
+  if (EXISTING_QUALITY) document.getElementById('quality').value = EXISTING_QUALITY;
 }
 
 function activeIndices() {
-  if (!groupFilter) return keypoints.map((_, i) => i);
-  return keypoints.map((k, i) => i).filter(i => keypoints[i].group === groupFilter);
+  return keypoints.map((_, i) => i).filter(i => {
+    if (groupFilter && keypoints[i].group !== groupFilter) return false;
+    return true;
+  });
 }
 
-function isRequired(kp) {
-  return (REQUIRED_KPS || []).includes(kp.name);
-}
+function isAddressed(kp) { return kp.visible !== VIS_UNSET; }
 
-// ── 좌표 변환 ──────────────────────────────────────────────
-function imgToCanvas(x, y) {
-  return [x * scale + offsetX, y * scale + offsetY];
-}
-function canvasToImg(cx, cy) {
-  return [(cx - offsetX) / scale, (cy - offsetY) / scale];
-}
-function clampImg(x, y) {
-  return [Math.max(0, Math.min(IMG_W, x)), Math.max(0, Math.min(IMG_H, y))];
-}
+function imgToCanvas(x, y) { return [x * scale + offsetX, y * scale + offsetY]; }
+function canvasToImg(cx, cy) { return [(cx - offsetX) / scale, (cy - offsetY) / scale]; }
+function clampImg(x, y) { return [Math.max(0, Math.min(IMG_W, x)), Math.max(0, Math.min(IMG_H, y))]; }
+
 function fitToCanvas() {
   const wrap = document.getElementById('canvas-wrap');
-  canvas.width  = wrap.clientWidth;
+  canvas.width = wrap.clientWidth;
   canvas.height = wrap.clientHeight;
-  const s = Math.min(canvas.width / IMG_W, canvas.height / IMG_H) * 0.92;
-  scale   = s;
-  offsetX = (canvas.width  - IMG_W * s) / 2;
+  const s = Math.min(canvas.width / IMG_W, canvas.height / IMG_H) * 0.94;
+  scale = s;
+  offsetX = (canvas.width - IMG_W * s) / 2;
   offsetY = (canvas.height - IMG_H * s) / 2;
 }
 
-// ── 드로우 ────────────────────────────────────────────────
+function visLabel(v) {
+  return {0: '미처리', 1: '가림', 2: '가시', 3: '밖'}[v] || '?';
+}
+
 function redraw() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.fillStyle = '#111827';
+  ctx.fillStyle = '#080810';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
+  if (img.complete) ctx.drawImage(img, offsetX, offsetY, IMG_W * scale, IMG_H * scale);
 
-  if (img.complete && img.naturalWidth) {
-    ctx.drawImage(img, offsetX, offsetY, IMG_W * scale, IMG_H * scale);
-  }
-
-  if (bbox && bbox.w > 0 && bbox.h > 0) {
+  if (bbox?.w > 0 && bbox?.h > 0) {
     const [bx, by] = imgToCanvas(bbox.x, bbox.y);
     ctx.save();
-    ctx.strokeStyle = '#00e5ff';
-    ctx.lineWidth   = 1.5;
-    ctx.setLineDash([5, 3]);
+    ctx.strokeStyle = '#00d4ff';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([6, 4]);
     ctx.strokeRect(bx, by, bbox.w * scale, bbox.h * scale);
+    ctx.fillStyle = 'rgba(0,212,255,0.06)';
+    ctx.fillRect(bx, by, bbox.w * scale, bbox.h * scale);
     ctx.restore();
   }
 
-  // 스켈레톤
-  ctx.save();
-  ctx.lineWidth = 2;
   CONNECTIONS.forEach(([a, b]) => {
     const A = keypoints[a], B = keypoints[b];
-    if (!A || !B || A.visible < 1 || B.visible < 1 || A.x == null || B.x == null) return;
+    if (!A || !B || A.visible !== VIS_VISIBLE || B.visible !== VIS_VISIBLE) return;
+    if (A.x == null || B.x == null) return;
     const [ax, ay] = imgToCanvas(A.x, A.y);
     const [bx, by2] = imgToCanvas(B.x, B.y);
-    ctx.beginPath();
-    ctx.moveTo(ax, ay);
-    ctx.lineTo(bx, by2);
-    const isBow = A.group === 'bow' || B.group === 'bow';
-    ctx.strokeStyle = A.visible === 1 || B.visible === 1
-      ? 'rgba(255,255,255,0.15)'
-      : isBow ? 'rgba(255,100,50,0.7)' : 'rgba(255,255,255,0.4)';
-    ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by2);
+    ctx.strokeStyle = A.group === 'bow' ? 'rgba(255,120,50,0.7)' : 'rgba(150,200,180,0.45)';
+    ctx.lineWidth = 1.5; ctx.stroke();
   });
-  ctx.restore();
 
   keypoints.forEach((kp, idx) => {
     if (groupFilter && kp.group !== groupFilter) return;
-    if (kp.visible === 0 || kp.x == null) return;
-    const [cx, cy] = imgToCanvas(kp.x, kp.y);
-    const isSel   = idx === selectedKP;
-    const isOcc   = kp.visible === 1;
-    const r       = isSel ? POINT_SELECTED : POINT_RADIUS;
+    if (!isAddressed(kp)) return;
+    if (kp.visible === VIS_OUTSIDE) return;
+    if (kp.visible === VIS_OCCLUDED && kp.x == null) return;
+
+    const [cx, cy] = imgToCanvas(kp.x ?? 0, kp.y ?? 0);
+    const isSel = idx === selectedKP;
+    const isOcc = kp.visible === VIS_OCCLUDED;
+    const r = isSel ? POINT_SELECTED : POINT_RADIUS;
 
     if (isSel) {
-      ctx.beginPath();
-      ctx.arc(cx, cy, r + 6, 0, Math.PI * 2);
-      ctx.strokeStyle = 'rgba(255,255,255,0.9)';
-      ctx.lineWidth   = 2;
-      ctx.stroke();
+      ctx.beginPath(); ctx.arc(cx, cy, r + 5, 0, Math.PI * 2);
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.stroke();
     }
-
-    ctx.beginPath();
-    ctx.arc(cx, cy, r, 0, Math.PI * 2);
-    ctx.fillStyle   = isOcc ? 'rgba(30,30,30,0.85)' : kp.color;
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.fillStyle = isOcc ? 'rgba(25,25,35,0.9)' : kp.color;
     ctx.fill();
-    ctx.strokeStyle = kp.color;
-    ctx.lineWidth   = isOcc ? 2 : 0;
-    ctx.stroke();
-
     if (isOcc) {
-      ctx.save();
-      ctx.strokeStyle = kp.color;
-      ctx.lineWidth   = 2;
+      ctx.strokeStyle = kp.color; ctx.lineWidth = 2; ctx.stroke();
       ctx.beginPath();
-      ctx.moveTo(cx - 5, cy - 5); ctx.lineTo(cx + 5, cy + 5);
-      ctx.moveTo(cx + 5, cy - 5); ctx.lineTo(cx - 5, cy + 5);
+      ctx.moveTo(cx-4,cy-4); ctx.lineTo(cx+4,cy+4);
+      ctx.moveTo(cx+4,cy-4); ctx.lineTo(cx-4,cy+4);
       ctx.stroke();
-      ctx.restore();
-    }
-
-    if (scale > 0.35) {
-      const label = kp.name + (isRequired(kp) ? '*' : '');
-      ctx.save();
-      ctx.font = `bold ${Math.min(13, Math.max(9, 10 * scale))}px monospace`;
-      const tw = ctx.measureText(label).width;
-      ctx.fillStyle = 'rgba(0,0,0,0.7)';
-      ctx.fillRect(cx + r + 2, cy - 11, tw + 6, 15);
-      ctx.fillStyle = isRequired(kp) ? '#ffcc00' : 'white';
-      ctx.fillText(label, cx + r + 5, cy + 2);
-      ctx.restore();
     }
   });
 
-  // 미배치 가이드
   const cur = keypoints[selectedKP];
-  if (mode === 'keypoint' && cur?.visible === 0 && mouseImgPos.x > 0) {
+  if (mode === 'keypoint' && cur?.visible === VIS_UNSET && mouseImgPos.x > 0) {
     const [gx, gy] = imgToCanvas(mouseImgPos.x, mouseImgPos.y);
-    if (gx > 0 && gx < canvas.width && gy > 0 && gy < canvas.height) {
-      ctx.beginPath();
-      ctx.arc(gx, gy, POINT_RADIUS, 0, Math.PI * 2);
-      ctx.strokeStyle = cur.color || 'white';
-      ctx.lineWidth   = 2;
-      ctx.setLineDash([4, 4]);
-      ctx.stroke();
-      ctx.setLineDash([]);
-    }
-  }
-
-  // 현재 kp 안내
-  if (mode === 'keypoint' && cur) {
-    const grp = GROUP_LABELS_KO[cur.group] || cur.group;
-    const desc = cur.desc ? ` — ${cur.desc}` : '';
-    ctx.save();
-    ctx.fillStyle = 'rgba(0,0,0,0.75)';
-    ctx.fillRect(10, 10, 320, 36);
-    ctx.fillStyle = cur.color;
-    ctx.font = 'bold 13px sans-serif';
-    ctx.fillText(`▶ [${grp}] ${cur.name}${desc}`, 18, 33);
-    ctx.restore();
+    ctx.beginPath(); ctx.arc(gx, gy, POINT_RADIUS, 0, Math.PI * 2);
+    ctx.strokeStyle = cur.color; ctx.lineWidth = 2; ctx.setLineDash([3,3]); ctx.stroke();
+    ctx.setLineDash([]);
   }
 }
 
-// ── 패널 ──────────────────────────────────────────────────
+function updateCurrentCard() {
+  const cur = keypoints[selectedKP];
+  if (!cur) return;
+  const el = id => document.getElementById(id);
+  if (el('kp-current-name')) el('kp-current-name').textContent = `${selectedKP + 1}. ${cur.label_short}`;
+  if (el('kp-current-sub')) el('kp-current-sub').textContent = cur.name;
+  if (el('kp-current-desc')) el('kp-current-desc').textContent = cur.desc;
+  if (el('kp-current-vis')) el('kp-current-vis').textContent = visLabel(cur.visible);
+  if (el('kp-current-vis')) el('kp-current-vis').className = 'vis-badge vis-' + cur.visible;
+}
+
 function updatePanel() {
   keypoints.forEach((kp, idx) => {
     const item = document.getElementById(`kp-item-${kp.kp_id}`);
     const stat = document.getElementById(`kp-status-${kp.kp_id}`);
     if (!item || !stat) return;
-
-    const dimmed = groupFilter && kp.group !== groupFilter;
     item.classList.toggle('kp-selected', idx === selectedKP);
-    item.classList.toggle('kp-dimmed', dimmed);
+    item.classList.toggle('kp-dimmed', groupFilter && kp.group !== groupFilter);
+    item.classList.toggle('kp-done', isAddressed(kp));
 
-    if (kp.visible === 0 || kp.x == null) {
-      stat.textContent = '—';
-      stat.style.color = '#555';
-    } else if (kp.visible === 1) {
-      stat.textContent = '가림';
-      stat.style.color = '#aaa';
-    } else {
-      stat.textContent = `${Math.round(kp.x)},${Math.round(kp.y)}`;
-      stat.style.color = kp.color;
-    }
+    if (!isAddressed(kp)) { stat.textContent = '—'; stat.style.color = '#555'; }
+    else if (kp.visible === VIS_VISIBLE) { stat.textContent = '●'; stat.style.color = kp.color; }
+    else if (kp.visible === VIS_OCCLUDED) { stat.textContent = '◐'; stat.style.color = '#aaa'; }
+    else if (kp.visible === VIS_OUTSIDE) { stat.textContent = '○'; stat.style.color = '#666'; }
   });
-
   const el = document.getElementById(`kp-item-${SCHEMA[selectedKP]?.id}`);
   if (el) el.scrollIntoView({block: 'nearest', behavior: 'smooth'});
+  updateCurrentCard();
 }
 
 function updateProgress() {
-  const active = groupFilter
-    ? keypoints.filter(k => k.group === groupFilter)
-    : keypoints;
-  const total  = active.length;
-  const done   = active.filter(k => k.visible > 0 && k.x != null).length;
-  const pct    = total ? Math.round(done / total * 100) : 0;
-  const bar    = document.getElementById('kp-progress-bar');
-  const label  = document.getElementById('kp-progress-label');
-  if (bar)   bar.style.width = pct + '%';
-  if (label) label.textContent = groupFilter
-    ? `${done}/${total} (${GROUP_LABELS_KO[groupFilter] || groupFilter})`
-    : `${done} / ${total}`;
+  const addressed = keypoints.filter(isAddressed).length;
+  const visible = keypoints.filter(k => k.visible === VIS_VISIBLE).length;
+  const bar = document.getElementById('kp-progress-bar');
+  const label = document.getElementById('kp-progress-label');
+  const pct = Math.round(addressed / keypoints.length * 100);
+  if (bar) bar.style.width = pct + '%';
+  if (label) label.textContent = `처리 ${addressed}/9 · 가시 ${visible}`;
+  const bboxEl = document.getElementById('bbox-status');
+  if (bboxEl) bboxEl.textContent = bbox?.w > 0 ? 'bbox ✓' : 'bbox 필요';
+  if (bboxEl) bboxEl.style.color = bbox?.w > 0 ? 'var(--green)' : 'var(--warn)';
 }
 
-// ── 이벤트 ────────────────────────────────────────────────
+function setVisState(vis) {
+  const kp = keypoints[selectedKP];
+  kp.visible = vis;
+  if (vis === VIS_OUTSIDE) { kp.x = 0; kp.y = 0; }
+  if (vis === VIS_OCCLUDED && kp.x == null) { kp.x = 0; kp.y = 0; }
+  advanceToNext();
+  redraw(); updatePanel(); updateProgress();
+}
+
+function advanceToNext() {
+  const indices = activeIndices();
+  const pos = indices.indexOf(selectedKP);
+  const next = indices.slice(pos + 1).find(i => !isAddressed(keypoints[i]));
+  if (next !== undefined) selectedKP = next;
+}
+
 canvas.addEventListener('mousemove', e => {
   const rect = canvas.getBoundingClientRect();
-  const cx = e.clientX - rect.left;
-  const cy = e.clientY - rect.top;
-  const [ix, iy] = canvasToImg(cx, cy);
-  mouseImgPos = {x: ix, y: iy};
-
+  const cx = e.clientX - rect.left, cy = e.clientY - rect.top;
+  mouseImgPos = Object.fromEntries(['x','y'].map((k,i) => [k, canvasToImg(cx,cy)[i]]));
   if (isPanning && panStart) {
     offsetX = panStart.ox + (cx - panStart.cx);
     offsetY = panStart.oy + (cy - panStart.cy);
     redraw(); return;
   }
-  if (isDragging && dragTarget) {
-    if (dragTarget.type === 'kp') {
-      let [nx, ny] = clampImg(ix, iy);
-      keypoints[dragTarget.idx].x = nx;
-      keypoints[dragTarget.idx].y = ny;
-      redraw(); updatePanel(); updateProgress();
-    } else if (dragTarget.type === 'bbox' && bboxStart) {
-      let [nx, ny] = clampImg(ix, iy);
-      bbox = {
-        x: Math.min(bboxStart[0], nx), y: Math.min(bboxStart[1], ny),
-        w: Math.abs(nx - bboxStart[0]),  h: Math.abs(ny - bboxStart[1])
-      };
-      redraw();
-    }
-    return;
+  if (isDragging && dragTarget?.type === 'kp') {
+    const [nx, ny] = clampImg(...canvasToImg(cx, cy));
+    const kp = keypoints[dragTarget.idx];
+    kp.x = nx; kp.y = ny;
+    if (kp.visible === VIS_UNSET) kp.visible = VIS_VISIBLE;
+    redraw(); updatePanel(); return;
   }
-
-  if (mode === 'keypoint') {
-    const hit = getHitKP(cx, cy);
-    canvas.style.cursor = hit >= 0 ? 'move' : 'crosshair';
+  if (isDragging && dragTarget?.type === 'bbox' && bboxStart) {
+    const [nx, ny] = clampImg(...canvasToImg(cx, cy));
+    bbox = { x: Math.min(bboxStart[0], nx), y: Math.min(bboxStart[1], ny),
+             w: Math.abs(nx - bboxStart[0]), h: Math.abs(ny - bboxStart[1]) };
+    redraw(); updateProgress(); return;
   }
-  if (mode === 'keypoint' && keypoints[selectedKP]?.visible === 0) redraw();
+  canvas.style.cursor = mode === 'bbox' ? 'crosshair' : (getHitKP(cx,cy) >= 0 ? 'move' : 'crosshair');
+  if (mode === 'keypoint') redraw();
 });
 
 canvas.addEventListener('mousedown', e => {
   const rect = canvas.getBoundingClientRect();
-  const cx = e.clientX - rect.left;
-  const cy = e.clientY - rect.top;
+  const cx = e.clientX - rect.left, cy = e.clientY - rect.top;
   const [ix, iy] = canvasToImg(cx, cy);
+  if (e.button === 1) { isPanning = true; panStart = {cx,cy,ox:offsetX,oy:offsetY}; e.preventDefault(); return; }
 
-  if (e.button === 1) {
-    isPanning = true;
-    panStart  = {cx, cy, ox: offsetX, oy: offsetY};
-    e.preventDefault(); return;
-  }
-
-  if (e.button === 2) {
-    const hit = getHitKP(cx, cy);
-    const idx = hit >= 0 ? hit : selectedKP;
-    if (keypoints[idx].x != null) {
-      keypoints[idx].visible = keypoints[idx].visible === 2 ? 1 : 2;
-      redraw(); updatePanel();
-    }
+  if (mode === 'bbox') {
+    const [nx, ny] = clampImg(ix, iy);
+    bboxStart = [nx, ny];
+    bbox = {x: nx, y: ny, w: 0, h: 0};
+    isDragging = true; dragTarget = {type: 'bbox'};
     return;
   }
 
-  if (mode === 'keypoint') {
-    const hit = getHitKP(cx, cy);
-    if (hit >= 0) {
-      isDragging = true;
-      dragTarget = {type: 'kp', idx: hit};
-      selectedKP = hit;
-      updatePanel();
-    } else {
-      let [nx, ny] = clampImg(ix, iy);
-      keypoints[selectedKP].x = nx;
-      keypoints[selectedKP].y = ny;
-      keypoints[selectedKP].visible = 2;
-      redraw(); updatePanel(); updateProgress();
-      advanceToNext();
-    }
-  } else if (mode === 'bbox') {
-    let [nx, ny] = clampImg(ix, iy);
-    bboxStart  = [nx, ny];
-    bbox       = {x: nx, y: ny, w: 0, h: 0};
-    isDragging = true;
-    dragTarget = {type: 'bbox'};
+  const hit = getHitKP(cx, cy);
+  if (hit >= 0) {
+    isDragging = true; dragTarget = {type: 'kp', idx: hit}; selectedKP = hit; updatePanel();
+  } else if (keypoints[selectedKP].visible === VIS_UNSET || keypoints[selectedKP].visible === VIS_VISIBLE) {
+    const [nx, ny] = clampImg(ix, iy);
+    keypoints[selectedKP].x = nx; keypoints[selectedKP].y = ny;
+    keypoints[selectedKP].visible = VIS_VISIBLE;
+    redraw(); updatePanel(); updateProgress(); advanceToNext();
   }
 });
 
-canvas.addEventListener('mouseup', () => {
-  isDragging = false; dragTarget = null;
-  isPanning  = false; panStart   = null;
-  redraw();
-});
-canvas.addEventListener('contextmenu', e => e.preventDefault());
-
+canvas.addEventListener('mouseup', () => { isDragging = false; dragTarget = null; isPanning = false; panStart = null; redraw(); });
+canvas.addEventListener('contextmenu', e => { e.preventDefault(); setVisState(VIS_OCCLUDED); });
 canvas.addEventListener('wheel', e => {
   e.preventDefault();
-  const rect   = canvas.getBoundingClientRect();
-  const cx     = e.clientX - rect.left;
-  const cy     = e.clientY - rect.top;
-  const factor = e.deltaY < 0 ? 1.12 : 0.89;
-  const ns     = Math.max(MIN_SCALE, Math.min(MAX_SCALE, scale * factor));
+  const rect = canvas.getBoundingClientRect();
+  const cx = e.clientX - rect.left, cy = e.clientY - rect.top;
+  const ns = Math.max(MIN_SCALE, Math.min(MAX_SCALE, scale * (e.deltaY < 0 ? 1.12 : 0.89)));
   offsetX = cx - (cx - offsetX) * (ns / scale);
   offsetY = cy - (cy - offsetY) * (ns / scale);
-  scale   = ns;
-  redraw();
+  scale = ns; redraw();
 }, {passive: false});
-
 window.addEventListener('resize', () => { fitToCanvas(); redraw(); });
 
 function getHitKP(cx, cy) {
   for (let i = keypoints.length - 1; i >= 0; i--) {
     const kp = keypoints[i];
+    if (kp.visible !== VIS_VISIBLE && kp.visible !== VIS_OCCLUDED) continue;
     if (kp.x == null) continue;
     const [kx, ky] = imgToCanvas(kp.x, kp.y);
     if (Math.hypot(cx - kx, cy - ky) < HIT_RADIUS) return i;
@@ -372,172 +290,91 @@ function getHitKP(cx, cy) {
   return -1;
 }
 
-function advanceToNext() {
-  const indices = activeIndices();
-  const pos = indices.indexOf(selectedKP);
-  const next = indices.slice(pos + 1).find(i => keypoints[i].visible === 0);
-  if (next !== undefined) { selectedKP = next; updatePanel(); }
-}
-
-// ── 컨트롤 ────────────────────────────────────────────────
-function selectKP(idx) {
-  if (idx < 0 || idx >= keypoints.length) return;
-  selectedKP = idx;
+function selectKP(idx) { if (idx >= 0 && idx < keypoints.length) { selectedKP = idx; redraw(); updatePanel(); } }
+function setGroupFilter(g) {
+  groupFilter = g === 'all' ? null : g;
+  document.querySelectorAll('.group-filter-btn').forEach(b =>
+    b.classList.toggle('active', b.dataset.group === (g || 'all')));
   redraw(); updatePanel();
 }
-
 function setMode(m) {
   mode = m;
-  document.getElementById('mode-kp').classList.toggle('active', m === 'keypoint');
-  document.getElementById('mode-bbox').classList.toggle('active', m === 'bbox');
-  const hints = {
-    keypoint: '클릭=배치  드래그=이동  우클릭=가림  C=이전복사',
-    bbox:     '드래그로 바운딩박스 그리기'
-  };
-  document.getElementById('mode-hint').textContent = hints[m] || '';
-}
-
-function setGroupFilter(grp) {
-  groupFilter = grp === 'all' ? null : grp;
-  document.querySelectorAll('.group-filter-btn').forEach(btn => {
-    btn.classList.toggle('active', btn.dataset.group === (grp || 'all'));
-  });
-  const first = activeIndices().find(i => keypoints[i].visible === 0);
-  if (first !== undefined) selectedKP = first;
-  redraw(); updatePanel(); updateProgress();
+  document.getElementById('mode-kp')?.classList.toggle('active', m === 'keypoint');
+  document.getElementById('mode-bbox')?.classList.toggle('active', m === 'bbox');
+  document.getElementById('mode-hint').textContent =
+    m === 'bbox' ? 'bbox: 9점+활 전체 포함' : '클릭=가시  우클릭=가림  U=프레임밖';
 }
 
 function resetAll() {
-  if (!confirm('이 프레임의 모든 키포인트를 초기화할까요?')) return;
-  keypoints.forEach(k => { k.x = null; k.y = null; k.visible = 0; });
-  bbox = null;
-  selectedKP = activeIndices()[0] || 0;
-  redraw(); updatePanel(); updateProgress();
-}
-
-function resetSelectedKP() {
-  keypoints[selectedKP].x = null;
-  keypoints[selectedKP].y = null;
-  keypoints[selectedKP].visible = 0;
-  redraw(); updatePanel(); updateProgress();
-}
-
-function skipKP() {
-  keypoints[selectedKP].visible = 1;
-  keypoints[selectedKP].x = keypoints[selectedKP].x ?? 0;
-  keypoints[selectedKP].y = keypoints[selectedKP].y ?? 0;
-  advanceToNext();
+  if (!confirm('초기화?')) return;
+  keypoints.forEach(k => { k.x = null; k.y = null; k.visible = VIS_UNSET; });
+  bbox = null; selectedKP = 0;
   redraw(); updatePanel(); updateProgress();
 }
 
 async function copyFromPrev() {
-  const status = document.getElementById('save-status');
-  status.textContent = '이전 프레임 불러오는 중...';
-  status.style.color = '#aaa';
+  const st = document.getElementById('save-status');
+  st.textContent = '복사중...';
   try {
-    const r = await fetch(`/api/annotations/prev/${FRAME_ID}`);
-    const d = await r.json();
-    if (!d || !d.keypoints) {
-      status.textContent = '이전 프레임 어노테이션이 없습니다';
-      status.style.color = '#ffaa00';
-      return;
-    }
+    const d = await (await fetch(`/api/annotations/prev/${FRAME_ID}`)).json();
+    if (!d?.keypoints) { st.textContent = '이전 없음'; return; }
     d.keypoints.forEach(e => {
       const kp = keypoints.find(k => k.kp_id === e.kp_id);
-      if (kp && e.visible > 0) {
-        kp.x = e.x; kp.y = e.y; kp.visible = e.visible;
-      }
+      if (kp && e.visible !== VIS_UNSET) { kp.x = e.x; kp.y = e.y; kp.visible = e.visible; }
     });
     if (d.bbox) bbox = {...d.bbox};
-    const first = activeIndices().find(i => keypoints[i].visible === 0);
-    selectedKP = first !== undefined ? first : 0;
+    selectedKP = keypoints.findIndex(k => !isAddressed(k));
+    if (selectedKP < 0) selectedKP = 0;
     redraw(); updatePanel(); updateProgress();
-    status.textContent = '✅ 이전 프레임에서 복사됨 — 위치만 미세 조정하세요';
-    status.style.color = '#44ff88';
-  } catch (err) {
-    status.textContent = '❌ ' + err.message;
-    status.style.color = '#ff4444';
-  }
+    st.textContent = '복사됨'; st.style.color = 'var(--green)';
+  } catch (e) { st.textContent = e.message; }
 }
 
-// ── 저장 ──────────────────────────────────────────────────
 async function saveAnnotation(autoAdvance = true) {
-  const btn    = document.getElementById('btn-save');
-  const status = document.getElementById('save-status');
-  btn.disabled = true;
-  btn.textContent = '저장중...';
-
-  const payload = {
-    frame_id:  FRAME_ID,
-    keypoints: keypoints.map(k => ({
-      kp_id: k.kp_id, x: k.x ?? 0, y: k.y ?? 0, visible: k.visible
-    })),
-    bbox:  bbox,
-    notes: document.getElementById('notes').value
-  };
-
+  const st = document.getElementById('save-status');
+  const quality = document.getElementById('quality')?.value || null;
   try {
     const r = await fetch('/api/annotations', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(payload)
+      body: JSON.stringify({
+        frame_id: FRAME_ID,
+        keypoints: keypoints.map(k => ({ kp_id: k.kp_id, x: k.x??0, y: k.y??0, visible: k.visible })),
+        bbox, notes: document.getElementById('notes').value, quality,
+      }),
     });
     const d = await r.json();
     if (d.error) throw new Error(d.error);
-
-    if (d.status === 'labeled') {
-      status.textContent = '✅ 저장 완료!';
-      status.style.color = '#44ff88';
-      btn.textContent = '💾 저장 (Enter)';
-      btn.disabled = false;
-      if (autoAdvance && NEXT_ID) {
-        setTimeout(() => { window.location.href = `/annotate/${NEXT_ID}`; }, 400);
-      }
-    } else if (d.missing && d.missing.length) {
-      status.textContent = `⚠️ 필수 미완료: ${d.missing.join(', ')}`;
-      status.style.color = '#ffaa00';
-      btn.textContent = '💾 저장 (Enter)';
-      btn.disabled = false;
-      const missId = keypoints.findIndex(k => d.missing.includes(k.name));
-      if (missId >= 0) selectKP(missId);
+    if (d.complete) {
+      st.textContent = '저장 완료'; st.style.color = 'var(--green)';
+      if (autoAdvance && NEXT_ID) setTimeout(() => location.href = `/annotate/${NEXT_ID}`, 350);
+    } else {
+      st.textContent = '미완료: ' + (d.missing || []).join(', ');
+      st.style.color = 'var(--warn)';
     }
-  } catch (err) {
-    status.textContent = '❌ 오류: ' + err.message;
-    btn.textContent = '💾 저장 (Enter)';
-    btn.disabled = false;
-  }
+  } catch (e) { st.textContent = e.message; st.style.color = 'var(--red)'; }
 }
 
-// ── 키보드 ────────────────────────────────────────────────
 document.addEventListener('keydown', e => {
-  if (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'INPUT') return;
-
-  switch(e.key) {
-    case 'Enter':     e.preventDefault(); saveAnnotation(); break;
-    case 'ArrowRight':
-      const btnNext = document.getElementById('btn-next');
-      if (btnNext?.href) window.location.href = btnNext.href;
-      break;
-    case 'ArrowLeft':
-      if (PREV_ID) window.location.href = `/annotate/${PREV_ID}`;
-      else history.back();
-      break;
-    case 'Escape':    selectKP(-1); break;
-    case 'r': case 'R': resetSelectedKP(); break;
-    case 'f': case 'F': fitToCanvas(); redraw(); break;
-    case 'b': case 'B': setMode(mode === 'bbox' ? 'keypoint' : 'bbox'); break;
+  if (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
+  switch (e.key) {
+    case 'Enter': e.preventDefault(); saveAnnotation(); break;
+    case 'ArrowRight': document.getElementById('btn-next')?.href && (location.href = document.getElementById('btn-next').href); break;
+    case 'ArrowLeft': PREV_ID ? location.href = `/annotate/${PREV_ID}` : history.back(); break;
     case 'c': case 'C': copyFromPrev(); break;
-    case 'x': case 'X': skipKP(); break;
+    case 'b': case 'B': setMode(mode === 'bbox' ? 'keypoint' : 'bbox'); break;
+    case 'v': case 'V': if (keypoints[selectedKP].x != null) { keypoints[selectedKP].visible = VIS_VISIBLE; updatePanel(); redraw(); } break;
+    case 'o': case 'O': setVisState(VIS_OCCLUDED); break;
+    case 'u': case 'U': setVisState(VIS_OUTSIDE); break;
+    case 'r': case 'R': keypoints[selectedKP].visible = VIS_UNSET; keypoints[selectedKP].x = null; keypoints[selectedKP].y = null; updatePanel(); redraw(); break;
+    case 'f': case 'F': fitToCanvas(); redraw(); break;
     case 'Tab':
       e.preventDefault();
-      const indices = activeIndices();
-      const pos = indices.indexOf(selectedKP);
-      selectKP(indices[(pos + 1) % indices.length]);
+      const idx = activeIndices();
+      const p = idx.indexOf(selectedKP);
+      selectKP(idx[(p + 1) % idx.length]);
       break;
+    case '0': selectKP(9); break;
   }
-
-  if (e.key >= '1' && e.key <= '9') {
-    const i = parseInt(e.key) - 1;
-    if (i < keypoints.length) selectKP(i);
-  }
+  if (e.key >= '1' && e.key <= '9') selectKP(parseInt(e.key) - 1);
 });

@@ -1,45 +1,20 @@
 {% extends "base.html" %}
-{% block title %}로그인 - BowLabel{% endblock %}
+{% block title %}로그인{% endblock %}
 {% block content %}
 <div class="login-page">
   <div class="login-hero">
-    <h1>바이올린 <em>활쓰기</em><br>라벨링 플랫폼</h1>
-    <p>활·바이올린·현 8개 키포인트만 라벨링.<br>관절·손가락은 MediaPipe로 별도 처리.</p>
-    <div class="feature-list">
-      <div class="feature-item">
-        <div class="feature-icon">👥</div>
-        <div><strong>팀 협업</strong>라벨러 5명+ 동시 작업, 자동 배분</div>
-      </div>
-      <div class="feature-item">
-        <div class="feature-icon">⚡</div>
-        <div><strong>빠른 라벨링</strong>C키 이전 프레임 복사, 그룹 필터</div>
-      </div>
-      <div class="feature-item">
-        <div class="feature-icon">📦</div>
-        <div><strong>YOLO Pose Export</strong>RTX A6000 로컬 학습 바로 가능</div>
-      </div>
-    </div>
+    <h1><em>violin_bowing_scene</em><br>9 keypoints</h1>
+    <p>프레임마다 bbox + 9점 전부.<br>Pilot agreement → Main 라벨링.</p>
   </div>
   <div class="login-side">
     <div class="login-box">
-      <div class="login-box-header">
-        <div class="login-logo">🎻</div>
-        <h2>로그인</h2>
-        <p class="login-sub">BowLabel 어노테이션 시스템</p>
-      </div>
-      {% if error %}
-      <div class="alert alert-error">{{ error }}</div>
-      {% endif %}
+      <h2>BowLabel v3</h2>
+      <p class="login-sub">내부 라벨링</p>
+      {% if error %}<div class="alert alert-error">{{ error }}</div>{% endif %}
       <form method="post">
-        <div class="form-group">
-          <label>아이디</label>
-          <input type="text" name="username" placeholder="username" required autofocus>
-        </div>
-        <div class="form-group">
-          <label>비밀번호</label>
-          <input type="password" name="password" placeholder="password" required>
-        </div>
-        <button type="submit" class="btn-primary full-width" style="margin-top:8px">로그인</button>
+        <div class="form-group"><label>아이디</label><input type="text" name="username" required autofocus></div>
+        <div class="form-group"><label>비밀번호</label><input type="password" name="password" required></div>
+        <button type="submit" class="btn-primary full-width">로그인</button>
       </form>
     </div>
   </div>

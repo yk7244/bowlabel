@@ -11,21 +11,20 @@
 <!-- KPI -->
 <div class="kpi-grid">
   <div class="kpi-card accent-blue">
-    <div class="kpi-label">전체 프레임</div>
-    <div class="kpi-value">{{ total_frames }}</div>
-    <div class="kpi-sub">추출된 프레임 수</div>
+    <div class="kpi-label">배정 작업</div>
+    <div class="kpi-value">{{ total_assign }}</div>
+    <div class="kpi-sub">frame × labeler</div>
   </div>
   <div class="kpi-card accent-green">
-    <div class="kpi-label">라벨링 완료</div>
-    <div class="kpi-value">{{ labeled_frames }}</div>
+    <div class="kpi-label">완료</div>
+    <div class="kpi-value">{{ done_assign }}</div>
     <div class="kpi-sub">
-      {% if total_frames > 0 %}{{ ((labeled_frames / total_frames) * 100)|int }}% 진행{% else %}—{% endif %}
+      {% if total_assign > 0 %}{{ ((done_assign / total_assign) * 100)|int }}%{% else %}—{% endif %}
     </div>
   </div>
   <div class="kpi-card accent-warn">
     <div class="kpi-label">미완료</div>
-    <div class="kpi-value">{{ total_frames - labeled_frames }}</div>
-    <div class="kpi-sub">배분 필요</div>
+    <div class="kpi-value">{{ total_assign - done_assign }}</div>
   </div>
   <div class="kpi-card accent-red">
     <div class="kpi-label">활성 라벨러</div>
@@ -44,20 +43,9 @@
       <div class="card-title">{{ p.name }}</div>
       <div class="card-meta">{{ p.description or '설명 없음' }}</div>
       <div class="card-stats">
-        <span>📹 {{ p.video_count or 0 }} 영상</span>
+        <span>📹 {{ p.video_count or 0 }}</span>
         <span>🖼️ {{ p.frame_count or 0 }} 프레임</span>
-        <span>✅ {{ p.labeled_count or 0 }} 완료</span>
       </div>
-      {% if p.frame_count and p.frame_count > 0 %}
-      <div class="progress-bar">
-        <div class="progress-fill"
-             style="width: {{ ((p.labeled_count or 0) / p.frame_count * 100)|int }}%"></div>
-      </div>
-      <div class="progress-text">
-        {{ ((p.labeled_count or 0) / p.frame_count * 100)|int }}% 완료
-        {% if p.reviewed_count %} · 검수 {{ p.reviewed_count }}{% endif %}
-      </div>
-      {% endif %}
     </a>
     {% endfor %}
   </div>

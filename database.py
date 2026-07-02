@@ -1,11 +1,60 @@
 """
-database.py - SQLite schema and helpers
+database.py - BowLabel SQLite schema v3
+Master annotation: violin_bowing_scene + 9 keypoints per frame
 """
 import sqlite3
-import os
 from pathlib import Path
 
 DB_PATH = Path(__file__).parent / "data.db"
+SCHEMA_VERSION = 3
+
+CLASS_NAME = "violin_bowing_scene"
+DEFAULT_PILOT_COUNT = 20
+
+# visibility: 0=미처리  1=occluded  2=visible  3=outside
+VIS_UNSET    = 0
+VIS_OCCLUDED = 1
+VIS_VISIBLE  = 2
+VIS_OUTSIDE  = 3
+
+DEFAULT_VIOLIN_SCHEMA = [
+    {"id": 0, "name": "bridge_g_foot",             "color": "#44FF88", "group": "bridge",
+     "label_short": "브릿지·G", "desc": "G현 측 브릿지 발 중심"},
+    {"id": 1, "name": "bridge_e_foot",             "color": "#4488FF", "group": "bridge",
+     "label_short": "브릿지·E", "desc": "E현 측 브릿지 발 중심"},
+    {"id": 2, "name": "fingerboard_nut_g_corner",  "color": "#88FFAA", "group": "fingerboard",
+     "label_short": "넛·G", "desc": "nut 쪽 지판 G 모서리"},
+    {"id": 3, "name": "fingerboard_nut_e_corner",  "color": "#88AAFF", "group": "fingerboard",
+     "label_short": "넛·E", "desc": "nut 쪽 지판 E 모서리"},
+    {"id": 4, "name": "fingerboard_body_g_corner", "color": "#66DD88", "group": "fingerboard",
+     "label_short": "바디·G", "desc": "body 쪽 지판 G 끝"},
+    {"id": 5, "name": "fingerboard_body_e_corner", "color": "#6688DD", "group": "fingerboard",
+     "label_short": "바디·E", "desc": "body 쪽 지판 E 끝"},
+    {"id": 6, "name": "bow_frog_endpoint",         "color": "#FFAA00", "group": "bow",
+     "label_short": "활·frog", "desc": "frog 쪽 활 끝점"},
+    {"id": 7, "name": "bow_tip_endpoint",          "color": "#FF4444", "group": "bow",
+     "label_short": "활·tip", "desc": "tip 쪽 활 끝점"},
+    {"id": 8, "name": "bow_midpoint_visible",      "color": "#FF8844", "group": "bow",
+     "label_short": "활·중점", "desc": "보이는 stick/hair 중심 중점"},
+]
+
+GROUP_LABELS = {
+    "bridge": "브릿지",
+    "fingerboard": "지판",
+    "bow": "활",
+}
+
+SKELETON_CONNECTIONS = [
+    [0, 1],
+    [2, 3], [4, 5], [2, 4], [3, 5],
+    [6, 8], [8, 7], [6, 7],
+]
+
+QUALITY_OPTIONS = [
+    ("high",   "높음 — 9점 대부분 명확"),
+    ("medium", "보통 — 일부 가림, visibility 처리됨"),
+    ("low",    "낮음 — 흐림/작음, 학습 제외 권장"),
+]
 
 
 def get_db():
@@ -16,34 +65,47 @@ def get_db():
     return conn
 
 
+def reset_db():
+    for p in (DB_PATH, DB_PATH.with_suffix(".db-shm"), DB_PATH.with_suffix(".db-wal")):
+        if p.exists():
+            p.unlink()
+    init_db()
+    print("[DB] Reset complete")
+
+
 def init_db():
     conn = get_db()
     c = conn.cursor()
 
-    # Users
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS meta (
+        key TEXT PRIMARY KEY,
+        value TEXT
+    )""")
+
     c.execute("""
     CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         username TEXT UNIQUE NOT NULL,
         password_hash TEXT NOT NULL,
-        role TEXT NOT NULL DEFAULT 'labeler',  -- 'admin' or 'labeler'
+        role TEXT NOT NULL DEFAULT 'labeler',
         created_at TEXT DEFAULT (datetime('now')),
         is_active INTEGER DEFAULT 1
     )""")
 
-    # Projects (e.g. "Violin Bow Stroke v1")
     c.execute("""
     CREATE TABLE IF NOT EXISTS projects (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
         description TEXT,
-        keypoint_schema TEXT NOT NULL,  -- JSON: [{id, name, color, connections:[]}]
+        class_name TEXT NOT NULL DEFAULT 'violin_bowing_scene',
+        keypoint_schema TEXT NOT NULL,
+        pilot_count INTEGER DEFAULT 20,
         created_by INTEGER REFERENCES users(id),
         created_at TEXT DEFAULT (datetime('now')),
-        status TEXT DEFAULT 'active'   -- 'active' | 'archived'
+        status TEXT DEFAULT 'active'
     )""")
 
-    # Videos
     c.execute("""
     CREATE TABLE IF NOT EXISTS videos (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -60,10 +122,9 @@ def init_db():
         duration_sec REAL,
         uploaded_by INTEGER REFERENCES users(id),
         uploaded_at TEXT DEFAULT (datetime('now')),
-        status TEXT DEFAULT 'pending'  -- 'pending' | 'extracting' | 'ready' | 'error'
+        status TEXT DEFAULT 'pending'
     )""")
 
-    # Frames
     c.execute("""
     CREATE TABLE IF NOT EXISTS frames (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -72,35 +133,45 @@ def init_db():
         filename TEXT NOT NULL,
         frame_index INTEGER NOT NULL,
         timestamp_sec REAL,
-        assigned_to INTEGER REFERENCES users(id),
-        status TEXT DEFAULT 'unlabeled',  -- 'unlabeled' | 'in_progress' | 'labeled' | 'reviewed'
-        labeled_by INTEGER REFERENCES users(id),
-        labeled_at TEXT,
-        reviewed_by INTEGER REFERENCES users(id),
-        reviewed_at TEXT
+        batch_type TEXT DEFAULT 'main',
+        UNIQUE(video_id, frame_index)
     )""")
 
-    # Annotations
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS frame_assignments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        frame_id INTEGER NOT NULL REFERENCES frames(id),
+        user_id INTEGER NOT NULL REFERENCES users(id),
+        status TEXT DEFAULT 'unlabeled',
+        labeled_at TEXT,
+        reviewed_by INTEGER REFERENCES users(id),
+        reviewed_at TEXT,
+        UNIQUE(frame_id, user_id)
+    )""")
+
     c.execute("""
     CREATE TABLE IF NOT EXISTS annotations (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         frame_id INTEGER REFERENCES frames(id),
         project_id INTEGER REFERENCES projects(id),
         labeled_by INTEGER REFERENCES users(id),
-        keypoints TEXT NOT NULL,   -- JSON: [{kp_id, x, y, visible}]
-        bbox TEXT,                 -- JSON: {x, y, w, h} optional
+        keypoints TEXT NOT NULL,
+        bbox TEXT,
+        quality TEXT,
         notes TEXT,
         created_at TEXT DEFAULT (datetime('now')),
-        updated_at TEXT DEFAULT (datetime('now'))
+        updated_at TEXT DEFAULT (datetime('now')),
+        UNIQUE(frame_id, labeled_by)
     )""")
 
+    c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)",
+              (str(SCHEMA_VERSION),))
     conn.commit()
     conn.close()
-    print("[DB] Initialized")
+    print(f"[DB] Initialized v{SCHEMA_VERSION}")
 
 
 def seed_admin(username="admin", password="admin1234"):
-    """초기 어드민 계정 생성"""
     from werkzeug.security import generate_password_hash
     conn = get_db()
     try:
@@ -109,42 +180,30 @@ def seed_admin(username="admin", password="admin1234"):
             (username, generate_password_hash(password, method="pbkdf2:sha256"))
         )
         conn.commit()
-        print(f"[DB] Admin created: {username} / {password}")
+        print(f"[DB] Admin: {username} / {password}")
     finally:
         conn.close()
 
 
-# 활쓰기 피드백용 키포인트 스키마 (8개)
-# 관절/손가락은 MediaPipe Pose+Hands로 별도 추론 — 라벨링 부담 최소화
-#
-# 탐지 목적:
-#   bow_*     → 활 각도, 방향(업/다운보우), 속도, sounding point
-#   violin_*  → 현 평면, 활 위치(브릿지~지판 비율)
-#   string_*  → 4현 위치 (브릿지 기준 활이 어느 현에 닿는지)
-DEFAULT_VIOLIN_SCHEMA = [
-    {"id": 0, "name": "bow_tip",       "color": "#FF4444", "group": "bow",     "desc": "활 끝 (tip)"},
-    {"id": 1, "name": "bow_frog",      "color": "#FFAA00", "group": "bow",     "desc": "개구리 (frog)"},
-    {"id": 2, "name": "bow_mid",       "color": "#FF8844", "group": "bow",     "desc": "활 중앙"},
-    {"id": 3, "name": "bow_contact",   "color": "#FF6666", "group": "bow",     "desc": "활모-현 접점"},
-    {"id": 4, "name": "violin_bridge", "color": "#FFFFFF", "group": "violin",  "desc": "브릿지 중앙"},
-    {"id": 5, "name": "violin_nut",    "color": "#CCCCCC", "group": "violin",  "desc": "넛 (scroll쪽)"},
-    {"id": 6, "name": "string_g",      "color": "#44FF88", "group": "strings", "desc": "G현 (브릿지)"},
-    {"id": 7, "name": "string_e",      "color": "#4488FF", "group": "strings", "desc": "E현 (브릿지)"},
-]
+def coco_visibility(v: int) -> int:
+    """BowLabel → COCO/YOLO visibility"""
+    if v == VIS_VISIBLE:
+        return 2
+    if v == VIS_OCCLUDED:
+        return 1
+    return 0
 
-# 필수 키포인트 (저장 전 검증)
-REQUIRED_KEYPOINTS = ["bow_tip", "bow_frog", "bow_contact", "violin_bridge"]
 
-GROUP_LABELS = {
-    "bow": "활 (Bow)",
-    "violin": "바이올린",
-    "strings": "현 (Strings)",
-}
-
-SKELETON_CONNECTIONS = [
-    [0, 2], [2, 1],        # bow: tip → mid → frog
-    [3, 2],                # contact → mid
-    [4, 5],                # bridge → nut (현 평면)
-    [6, 4], [4, 7],        # G현 → bridge → E현
-    [3, 4],                # contact → bridge (sounding point 참조)
-]
+def annotation_complete(keypoints: list, bbox: dict, n_kp: int = 9):
+    """9점 모두 처리됐는지 + bbox 유효 여부. missing = 미처리 kp name 목록"""
+    missing = []
+    for kp in keypoints:
+        vis = kp.get("visible", VIS_UNSET)
+        if vis == VIS_UNSET:
+            missing.append(kp.get("name") or str(kp.get("kp_id")))
+        elif vis == VIS_VISIBLE:
+            if kp.get("x") is None or kp.get("y") is None:
+                missing.append(kp.get("name") or str(kp.get("kp_id")))
+    if not bbox or bbox.get("w", 0) <= 0 or bbox.get("h", 0) <= 0:
+        missing.append("__bbox__")
+    return len(missing) == 0, missing

@@ -450,6 +450,43 @@ input:focus, textarea:focus, select:focus {
 .btn-claim:hover { transform: translateY(-1px); box-shadow: 0 4px 20px #00d4ff40; }
 .btn-claim:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 
+.kp-item.kp-done { opacity: 0.85; }
+.kp-item.kp-done .kp-label { color: var(--text-muted); }
+
+/* 현재 포인트 카드 */
+.kp-current-card {
+  padding: 12px 14px;
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border);
+}
+.kp-current-name {
+  font-size: 14px; font-weight: 600; margin: 6px 0 4px;
+  font-family: 'JetBrains Mono', monospace;
+}
+.kp-current-desc { font-size: 12px; line-height: 1.45; color: var(--text); }
+.kp-current-usage { font-size: 11px; margin-top: 4px; }
+.panel-compact { padding: 8px 12px; }
+
+.tier-pill {
+  font-size: 9px; font-weight: 700; padding: 2px 6px;
+  border-radius: 4px; letter-spacing: 0.03em; flex-shrink: 0;
+}
+.tier-minimum     { background: #fbbf2420; color: #fbbf24; border: 1px solid #fbbf2440; }
+.tier-strong      { background: #a78bfa20; color: #a78bfa; border: 1px solid #a78bfa40; }
+.tier-recommended { background: #7a7a9a20; color: #9a9ab0; border: 1px solid #7a7a9a40; }
+
+.kp-item-text { flex: 1; min-width: 0; }
+.kp-label { display: block; font-size: 12px; font-weight: 600; }
+.kp-name-sub {
+  display: block; font-size: 9px; font-family: 'JetBrains Mono', monospace;
+  color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.kp-status { font-size: 11px; min-width: 20px; text-align: right; flex-shrink: 0; }
+.progress-bar-sm { height: 5px; }
+.save-status { text-align: center; font-size: 11px; margin-top: 6px; min-height: 14px; color: var(--text-muted); }
+
+.schema-tier { font-size: 10px; margin-left: 4px; opacity: 0.7; }
+
 /* ── Annotate layout ── */
 .annotate-topbar {
   height: 48px; min-height: 48px;
@@ -530,8 +567,8 @@ input:focus, textarea:focus, select:focus {
   position: sticky; top: 0; z-index: 1;
 }
 .kp-item {
-  display: flex; align-items: center; gap: 8px;
-  padding: 8px 14px; cursor: pointer;
+  display: flex; align-items: center; gap: 6px;
+  padding: 7px 12px; cursor: pointer;
   border-bottom: 1px solid #1a1a30;
   transition: background var(--transition);
 }

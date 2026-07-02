@@ -1,65 +1,41 @@
 {% extends "base.html" %}
-{% block title %}프레임 갤러리 - {{ proj.name }}{% endblock %}
+{% block title %}갤러리 — {{ proj.name }}{% endblock %}
 {% block content %}
 <div class="page-header">
-  <h2>🖼️ {{ proj.name }} — 프레임 갤러리</h2>
+  <h2>{{ proj.name }}</h2>
   <a href="{{ url_for('project_detail', pid=proj.id) }}" class="btn-secondary">← 프로젝트</a>
 </div>
 
-<!-- 필터 -->
 <form class="filter-bar" method="get">
-  <select name="status" onchange="this.form.submit()">
-    <option value="all"         {% if status_filter=='all'         %}selected{% endif %}>전체</option>
-    <option value="unlabeled"   {% if status_filter=='unlabeled'   %}selected{% endif %}>미완료</option>
-    <option value="labeled"     {% if status_filter=='labeled'     %}selected{% endif %}>완료</option>
-    <option value="reviewed"    {% if status_filter=='reviewed'    %}selected{% endif %}>검수완료</option>
+  <select name="batch" onchange="this.form.submit()">
+    <option value="all" {% if batch_filter=='all' %}selected{% endif %}>전체</option>
+    <option value="pilot" {% if batch_filter=='pilot' %}selected{% endif %}>Pilot</option>
+    <option value="main" {% if batch_filter=='main' %}selected{% endif %}>Main</option>
   </select>
-  <select name="video_id" onchange="this.form.submit()">
-    <option value="all" {% if video_filter=='all' %}selected{% endif %}>전체 영상</option>
-    {% for v in videos %}
-    <option value="{{ v.id }}" {% if video_filter==v.id|string %}selected{% endif %}>
-      {{ v.original_name[:40] }}
-    </option>
-    {% endfor %}
-  </select>
-  <span class="muted" style="font-size:13px">총 {{ total }}개</span>
+  <span class="muted">{{ total }}장</span>
 </form>
 
-<!-- 그리드 -->
 <div class="frame-grid">
   {% for f in frames %}
-  <a class="frame-card {{ f.status }}" href="{{ url_for('annotate', frame_id=f.id) }}">
+  <a class="frame-card {{ f.batch_type }}" href="{{ url_for('annotate', frame_id=f.id) }}">
     <div class="frame-thumb">
-      <img src="{{ url_for('serve_frame', video_id=f.video_id, filename=f.filename) }}"
-           loading="lazy" alt="frame {{ f.frame_index }}">
-      <span class="frame-badge badge
-        {% if f.status=='reviewed' %}badge-on
-        {% elif f.status=='labeled' %}badge-labeler
-        {% else %}badge-pending{% endif %}">
-        {{ '✅' if f.status=='reviewed' else '✏️' if f.status=='labeled' else '—' }}
-      </span>
+      <img src="{{ url_for('serve_frame', video_id=f.video_id, filename=f.filename) }}" loading="lazy">
+      <span class="frame-badge badge badge-labeler">{{ f.batch_type }}</span>
     </div>
     <div class="frame-meta">
       <div class="frame-idx">#{{ f.frame_index }}</div>
-      <div class="frame-vid muted">{{ f.original_name[:22] }}</div>
-      {% if f.labeled_by_name %}
-      <div class="frame-labeler muted">👤 {{ f.labeled_by_name }}</div>
-      {% endif %}
+      <div class="frame-vid muted">{{ f.done_assignments }}/{{ f.total_assignments }} 완료</div>
     </div>
   </a>
   {% else %}
-  <div class="empty-state" style="grid-column:1/-1">
-    해당 조건의 프레임이 없습니다.
-  </div>
+  <div class="empty-state" style="grid-column:1/-1">프레임 없음</div>
   {% endfor %}
 </div>
 
-<!-- 페이지네이션 -->
 {% if pages > 1 %}
 <div class="pagination">
   {% for p in range(1, pages+1) %}
-  <a href="?status={{ status_filter }}&video_id={{ video_filter }}&page={{ p }}"
-     class="page-btn {% if p==page %}active{% endif %}">{{ p }}</a>
+  <a href="?batch={{ batch_filter }}&page={{ p }}" class="page-btn {% if p==page %}active{% endif %}">{{ p }}</a>
   {% endfor %}
 </div>
 {% endif %}

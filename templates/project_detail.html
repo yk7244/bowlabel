@@ -4,7 +4,8 @@
 <div class="page-header">
   <h2>📁 {{ proj.name }}</h2>
   <div style="display:flex;gap:8px">
-    <a href="{{ url_for('frame_gallery', pid=proj.id) }}" class="btn-secondary">🖼️ 프레임 갤러리</a>
+    <a href="{{ url_for('agreement_view', pid=proj.id) }}" class="btn-secondary">Pilot agreement</a>
+    <a href="{{ url_for('frame_gallery', pid=proj.id) }}" class="btn-secondary">갤러리</a>
     <a href="{{ url_for('admin_dashboard') }}" class="btn-secondary">← 뒤로</a>
   </div>
 </div>
@@ -46,7 +47,7 @@
     <table class="data-table">
       <thead><tr>
         <th>ID</th><th>파일명</th><th>연주자</th><th>세션</th>
-        <th>길이</th><th>FPS</th><th>프레임</th><th>완료</th><th>상태</th><th>액션</th>
+        <th>길이</th><th>FPS</th><th>프레임</th><th>상태</th><th>액션</th>
       </tr></thead>
       <tbody>
         {% for v in videos %}
@@ -58,7 +59,6 @@
           <td>{{ "%.0f"|format(v.duration_sec or 0) }}s</td>
           <td>{{ "%.1f"|format(v.fps or 0) }}</td>
           <td>{{ v.frame_count or 0 }}</td>
-          <td>{{ v.done_count or 0 }}</td>
           <td><span class="badge
             {% if v.status=='ready' %}badge-on
             {% elif v.status=='extracting' %}badge-warn
@@ -88,47 +88,54 @@
 <!-- 탭: 배분 -->
 <div id="tab-assign" class="tab-content hidden">
   <div class="assign-box">
-    <p class="muted" style="margin-bottom:14px">라벨러를 선택하면 미완료 프레임을 자동으로 균등 배분합니다.</p>
-    <div class="form-row" style="flex-wrap:wrap;gap:12px">
+    <h4 style="margin-bottom:10px">워크플로 배분</h4>
+    <p class="muted" style="margin-bottom:12px;font-size:13px;line-height:1.6">
+      <strong>Pilot</strong>: 앞 N장 → 선택한 라벨러 <em>전원</em>이 각각 9점 라벨링 (agreement)<br>
+      <strong>Main</strong>: 나머지 → 라벨러별 균등 분배, 각자 맡은 장마다 9점 전부
+    </p>
+    <div class="form-group" style="max-width:200px">
+      <label>Pilot 프레임 수</label>
+      <input type="number" id="pilot-count" value="{{ proj.pilot_count or 20 }}" min="1" max="500">
+    </div>
+    <div class="form-row" style="flex-wrap:wrap;gap:10px;margin:12px 0">
       {% for u in users %}
       <label class="checkbox-label">
         <input type="checkbox" class="assign-user" value="{{ u.id }}">
         {{ u.username }}
       </label>
       {% else %}
-      <span class="muted">등록된 라벨러가 없습니다. 관리자 대시보드에서 추가하세요.</span>
+      <span class="muted">라벨러 없음 — 대시보드에서 추가</span>
       {% endfor %}
     </div>
-    <div style="margin-top:14px">
-      <button class="btn-primary" onclick="assignFrames()">배분 시작</button>
-    </div>
-    <div id="assign-result" class="muted" style="margin-top:10px;font-size:13px"></div>
+    <button class="btn-primary" onclick="setupWorkflow()">배분 실행</button>
+    <div id="assign-result" style="margin-top:12px;font-size:13px"></div>
   </div>
 </div>
 
 <!-- 탭: 내보내기 -->
 <div id="tab-export" class="tab-content hidden">
   <div class="export-box">
+    <p class="muted" style="margin-bottom:14px;font-size:13px">
+      Class: <code>{{ class_name }}</code> · 9 keypoints · main 배치 기준 (pilot 제외)
+    </p>
     <div class="export-item">
-      <div>
-        <div class="export-title">COCO JSON</div>
-        <div class="muted" style="font-size:12px">MMPose, ViTPose, RTMPose 학습용</div>
-      </div>
-      <a href="{{ url_for('export_project', pid=proj.id, fmt='coco') }}" class="btn-secondary">다운로드</a>
-    </div>
-    <div class="export-item">
-      <div>
-        <div class="export-title">YOLO Pose ZIP</div>
-        <div class="muted" style="font-size:12px">YOLOv8-pose, YOLOv11-pose 학습용</div>
-      </div>
+      <div><div class="export-title">YOLO Pose ZIP</div>
+        <div class="muted" style="font-size:12px">학습용 (main)</div></div>
       <a href="{{ url_for('export_project', pid=proj.id, fmt='yolo') }}" class="btn-secondary">다운로드</a>
     </div>
     <div class="export-item">
-      <div>
-        <div class="export-title">CSV</div>
-        <div class="muted" style="font-size:12px">Python 분석 / 논문 테이블용</div>
-      </div>
+      <div><div class="export-title">COCO JSON</div>
+        <div class="muted" style="font-size:12px">MMPose / RTMPose</div></div>
+      <a href="{{ url_for('export_project', pid=proj.id, fmt='coco') }}" class="btn-secondary">다운로드</a>
+    </div>
+    <div class="export-item">
+      <div><div class="export-title">CSV</div></div>
       <a href="{{ url_for('export_project', pid=proj.id, fmt='csv') }}" class="btn-secondary">다운로드</a>
+    </div>
+    <div class="export-item">
+      <div><div class="export-title">Pilot Agreement CSV</div>
+        <div class="muted" style="font-size:12px">라벨러별 pilot 20장 비교</div></div>
+      <a href="{{ url_for('export_project', pid=proj.id, fmt='agreement') }}" class="btn-secondary">다운로드</a>
     </div>
   </div>
 </div>
@@ -171,20 +178,17 @@ let extractVid = null;
 // Stats
 function loadStats() {
   fetch(`/api/projects/${PID}/stats`).then(r=>r.json()).then(d => {
-    const f = d.frames, total = f.total||1;
-    const done = (f.labeled||0)+(f.reviewed||0);
-    const pct  = Math.round(done/total*100);
+    const fb = d.frames_by_batch || {};
+    const as = d.assignments || {};
+    let userHtml = (d.by_user||[]).map(u =>
+      `<span class="stat-pill">${u.username} [${u.batch_type}] <b>${u.done}/${u.total}</b></span>`
+    ).join('');
     document.getElementById('stats-bar').innerHTML = `
       <div class="stats-row">
-        <span class="stat-pill">전체 <b>${f.total}</b></span>
-        <span class="stat-pill">미완료 <b>${f.unlabeled||0}</b></span>
-        <span class="stat-pill">완료 <b>${(f.labeled||0)+(f.reviewed||0)}</b></span>
-        <span class="stat-pill">검수 <b>${f.reviewed||0}</b></span>
-        <span class="stat-pill">진행률 <b>${pct}%</b></span>
-        ${d.per_user.map(u=>`<span class="stat-pill">👤 ${u.username} <b>${u.count}</b></span>`).join('')}
-      </div>
-      <div class="progress-bar" style="margin-top:12px">
-        <div class="progress-fill" style="width:${pct}%"></div>
+        <span class="stat-pill">Pilot <b>${fb.pilot||0}</b></span>
+        <span class="stat-pill">Main <b>${fb.main||0}</b></span>
+        <span class="stat-pill">배정 완료 <b>${as.labeled||0}</b> / ${Object.values(as).reduce((a,b)=>a+b,0)||0}</span>
+        ${userHtml}
       </div>`;
   });
 }
@@ -267,15 +271,18 @@ document.getElementById('form-extract').addEventListener('submit', e=>{
 });
 
 // Assign
-function assignFrames() {
+function setupWorkflow() {
   const ids = [...document.querySelectorAll('.assign-user:checked')].map(e=>+e.value);
-  if (!ids.length) { alert('라벨러를 1명 이상 선택하세요.'); return; }
-  fetch(`/admin/projects/${PID}/assign`, {
+  const pilot = +document.getElementById('pilot-count').value || 20;
+  if (!ids.length) { alert('라벨러 1명 이상 선택'); return; }
+  if (!confirm(`Pilot ${pilot}장(전원) + Main 균등 배분?`)) return;
+  fetch(`/admin/projects/${PID}/setup-workflow`, {
     method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({user_ids:ids})
+    body: JSON.stringify({user_ids: ids, pilot_count: pilot})
   }).then(r=>r.json()).then(d=>{
-    document.getElementById('assign-result').textContent =
-      `✅ ${d.assigned}개 프레임을 ${d.to}명에게 균등 배분 완료!`;
+    if (d.error) { alert(d.error); return; }
+    document.getElementById('assign-result').innerHTML =
+      `✅ 총 ${d.total}장 — Pilot ${d.pilot}장(×${d.labelers}명) + Main ${d.main}장`;
     loadStats();
   });
 }

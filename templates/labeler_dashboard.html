@@ -1,79 +1,60 @@
 {% extends "base.html" %}
-{% block title %}내 작업 - BowLabel{% endblock %}
+{% block title %}내 작업{% endblock %}
 {% block content %}
 
 <div class="labeler-hero">
   <div class="labeler-hero-left">
-    <h2>👋 {{ username }}</h2>
-    <p>배정된 프레임을 라벨링해. C키로 이전 프레임 복사하면 훨씬 빨라.</p>
+    <h2>{{ username }}</h2>
+    <p>매 프레임마다 <strong>bbox 1개 + 키포인트 9개 전부</strong>. 안 보이면 가림/프레임밖 처리.</p>
   </div>
   <div class="labeler-stats">
+    {% for s in stats %}
     <div class="labeler-stat">
-      <div class="labeler-stat-val" style="color:var(--green)">{{ done_count }}</div>
-      <div class="labeler-stat-lbl">완료</div>
+      <div class="labeler-stat-val">{{ s.done }}/{{ s.total }}</div>
+      <div class="labeler-stat-lbl">{{ 'PILOT' if s.batch_type=='pilot' else 'MAIN' }}</div>
     </div>
-    <div class="labeler-stat">
-      <div class="labeler-stat-val" style="color:var(--warn)">{{ in_progress_count }}</div>
-      <div class="labeler-stat-lbl">진행중</div>
-    </div>
-    <div class="labeler-stat">
-      <div class="labeler-stat-val">{{ total_count - done_count }}</div>
-      <div class="labeler-stat-lbl">남은 작업</div>
-    </div>
+    {% endfor %}
   </div>
-  <button class="btn-claim" onclick="claimNext()" id="btn-claim">▶ 다음 작업 시작</button>
+  <div style="display:flex;gap:8px;flex-wrap:wrap">
+    <button class="btn-claim" onclick="claimNext()">▶ 다음 작업</button>
+    <button class="btn-secondary btn-sm" onclick="claimNext('pilot')" style="padding:10px 16px">Pilot만</button>
+  </div>
 </div>
 
 {% if tasks %}
 <div class="table-wrap">
   <table class="data-table">
     <thead>
-      <tr>
-        <th>프로젝트</th><th>영상</th><th>프레임</th><th>시간</th><th>상태</th><th></th>
-      </tr>
+      <tr><th>구분</th><th>프로젝트</th><th>영상</th><th>#</th><th>상태</th><th></th></tr>
     </thead>
     <tbody>
       {% for t in tasks %}
       <tr>
-        <td><span class="badge badge-labeler">{{ t.project_name }}</span></td>
-        <td title="{{ t.original_name }}">{{ t.original_name[:28] }}{% if t.original_name|length > 28 %}…{% endif %}</td>
-        <td><strong>#{{ t.frame_index }}</strong></td>
-        <td class="muted">{{ "%.2f"|format(t.timestamp_sec or 0) }}s</td>
-        <td>
-          <span class="badge {{ 'badge-warn' if t.status == 'in_progress' else 'badge-pending' }}">
-            {{ '진행중' if t.status == 'in_progress' else '미완료' }}
-          </span>
-        </td>
-        <td>
-          <a href="{{ url_for('annotate', frame_id=t.id) }}" class="btn-sm btn-primary">라벨링 →</a>
-        </td>
+        <td><span class="badge {{ 'badge-labeler' if t.batch_type=='pilot' else 'badge-pending' }}">
+          {{ 'PILOT' if t.batch_type=='pilot' else 'MAIN' }}</span></td>
+        <td>{{ t.project_name }}</td>
+        <td title="{{ t.original_name }}">{{ t.original_name[:24] }}…</td>
+        <td>#{{ t.frame_index }}</td>
+        <td><span class="badge badge-warn">{{ t.status }}</span></td>
+        <td><a href="{{ url_for('annotate', frame_id=t.id) }}" class="btn-sm btn-primary">라벨링</a></td>
       </tr>
       {% endfor %}
     </tbody>
   </table>
 </div>
 {% else %}
-<div class="empty-state">
-  <div class="empty-icon">🎉</div>
-  <p>배정된 작업이 없어. 관리자한테 배분 요청해.</p>
-</div>
+<div class="empty-state"><div class="empty-icon">✓</div><p>남은 작업 없음</p></div>
 {% endif %}
 
 <script>
-async function claimNext() {
-  const btn = document.getElementById('btn-claim');
-  btn.disabled = true;
-  btn.textContent = '불러오는 중...';
-  try {
-    const r = await fetch('/labeler/claim', {method: 'POST'});
-    const d = await r.json();
-    if (d.url) window.location.href = d.url;
-    else alert(d.error || '작업이 없어.');
-  } catch(e) {
-    alert('오류: ' + e.message);
-  }
-  btn.disabled = false;
-  btn.textContent = '▶ 다음 작업 시작';
+async function claimNext(batch) {
+  const r = await fetch('/labeler/claim', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(batch ? {batch} : {})
+  });
+  const d = await r.json();
+  if (d.url) location.href = d.url;
+  else alert(d.error || '작업 없음');
 }
 </script>
 {% endblock %}
