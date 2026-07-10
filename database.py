@@ -1,5 +1,5 @@
 """
-database.py - BowLabel SQLite schema v4
+database.py - BowLabel SQLite schema v5
 
 Master annotation: one `violin_bowing_scene` object per frame.
 
@@ -9,12 +9,12 @@ Core keypoints (9, kpt_shape [9,3]) — chosen for empirical labelability:
     1 fingerboard_body_e_corner
     2 tailpiece_upper_center
     3 tailpiece_lower_center
-  bow (visible stick centerline, resampled from a polyline)
-    4 bow_visible_stick_start   (frog/button side of the *visible* stick)
-    5 bow_visible_stick_25      (auto, 25% along visible arc-length)
-    6 bow_visible_stick_50      (auto, 50%)
-    7 bow_visible_stick_75      (auto, 75%)
-    8 bow_visible_stick_end     (tip/head side of the *visible* stick)
+  bow axis (visible stick centerline, resampled from a polyline)
+    4 bow_axis_visible_start   (frog/button side of the *visible* axis)
+    5 bow_axis_visible_25      (auto, 25% along visible arc-length)
+    6 bow_axis_visible_50      (auto, 50%)
+    7 bow_axis_visible_75      (auto, 75%)
+    8 bow_axis_visible_end     (tip/head side of the *visible* axis)
 
 Optional keypoints (labeled only when clearly visible; used for subset
 validation, never required for completion, excluded from YOLO kpt_shape):
@@ -28,11 +28,13 @@ Rationale (see CHANGELOG / README):
   - the bow is cambered, so we never fit a single global tip-frog line; we label
     the *visible* stick centerline and resample it, then compute a local tangent.
 """
+import json
+import math
 import sqlite3
 from pathlib import Path
 
 DB_PATH = Path(__file__).parent / "data.db"
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 CLASS_NAME = "violin_bowing_scene"
 DEFAULT_PILOT_COUNT = 20
@@ -61,22 +63,22 @@ DEFAULT_VIOLIN_SCHEMA = [
      "label": "Tailpiece · lower", "kind": "point",
      "desc": "Center of the tailpiece bottom (endpin/chinrest side)."},
 
-    # ── bow (visible stick centerline) ─────────────────────────────────
-    {"id": 4, "name": "bow_visible_stick_start", "color": "#f59e0b", "group": "bow",
-     "label": "Bow visible · start", "kind": "bow", "auto": False,
-     "desc": "Frog/button side end of the VISIBLE stick centerline."},
-    {"id": 5, "name": "bow_visible_stick_25", "color": "#fb923c", "group": "bow",
-     "label": "Bow visible · 25%", "kind": "bow", "auto": True,
-     "desc": "Auto: 25% along the visible stick arc-length."},
-    {"id": 6, "name": "bow_visible_stick_50", "color": "#f97316", "group": "bow",
-     "label": "Bow visible · 50%", "kind": "bow", "auto": True,
-     "desc": "Auto: 50% along the visible stick arc-length."},
-    {"id": 7, "name": "bow_visible_stick_75", "color": "#ea6a2c", "group": "bow",
-     "label": "Bow visible · 75%", "kind": "bow", "auto": True,
-     "desc": "Auto: 75% along the visible stick arc-length."},
-    {"id": 8, "name": "bow_visible_stick_end", "color": "#e94560", "group": "bow",
-     "label": "Bow visible · end", "kind": "bow", "auto": False,
-     "desc": "Tip/head side end of the VISIBLE stick centerline."},
+    # ── bow axis (visible stick centerline) ─────────────────────────────
+    {"id": 4, "name": "bow_axis_visible_start", "color": "#f59e0b", "group": "bow",
+     "label": "Bow axis · start", "kind": "bow", "auto": False,
+     "desc": "Frog/button-side end of the VISIBLE bow-stick axis."},
+    {"id": 5, "name": "bow_axis_visible_25", "color": "#fb923c", "group": "bow",
+     "label": "Bow axis · 25%", "kind": "bow", "auto": True,
+     "desc": "Auto: 25% along the visible bow-axis arc-length."},
+    {"id": 6, "name": "bow_axis_visible_50", "color": "#f97316", "group": "bow",
+     "label": "Bow axis · 50%", "kind": "bow", "auto": True,
+     "desc": "Auto: 50% along the visible bow-axis arc-length."},
+    {"id": 7, "name": "bow_axis_visible_75", "color": "#ea6a2c", "group": "bow",
+     "label": "Bow axis · 75%", "kind": "bow", "auto": True,
+     "desc": "Auto: 75% along the visible bow-axis arc-length."},
+    {"id": 8, "name": "bow_axis_visible_end", "color": "#e94560", "group": "bow",
+     "label": "Bow axis · end", "kind": "bow", "auto": False,
+     "desc": "Tip/head-side end of the VISIBLE bow-stick axis."},
 
     # ── optional (validation only) ─────────────────────────────────────
     {"id": 9, "name": "bridge_g_foot_center", "color": "#a78bfa", "group": "optional",
@@ -97,7 +99,7 @@ BOW_IDS      = [k["id"] for k in DEFAULT_VIOLIN_SCHEMA if k["group"] == "bow"]
 
 GROUP_LABELS = {
     "instrument": "Instrument",
-    "bow": "Bow (visible stick)",
+    "bow": "Bow axis (visible stick)",
     "optional": "Optional",
 }
 
@@ -233,6 +235,26 @@ def init_db():
     # migrations for DBs created before v4
     _ensure_column(conn, "annotations", "meta", "TEXT")
 
+    # v4 -> v5 is a name-only migration: keypoint ids and saved coordinates
+    # remain valid, while projects receive the unambiguous bow_axis_* names.
+    current_by_id = {k["id"]: k for k in DEFAULT_VIOLIN_SCHEMA}
+    for project in conn.execute("SELECT id, keypoint_schema FROM projects").fetchall():
+        try:
+            schema = json.loads(project["keypoint_schema"])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        changed = False
+        for item in schema:
+            if (str(item.get("name", "")).startswith("bow_visible_stick_")
+                    and item.get("id") in current_by_id):
+                item.update(current_by_id[item["id"]])
+                changed = True
+        if changed:
+            conn.execute(
+                "UPDATE projects SET keypoint_schema=? WHERE id=?",
+                (json.dumps(schema, ensure_ascii=False), project["id"])
+            )
+
     c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)",
               (str(SCHEMA_VERSION),))
     conn.commit()
@@ -263,18 +285,71 @@ def coco_visibility(v: int) -> int:
     return 0  # unset / outside
 
 
+def generate_bbox(keypoints: list, schema: list, image_width: int,
+                  image_height: int, margin_ratio: float = 0.08,
+                  min_size: int = 96):
+    """
+    Deterministically create the violin_bowing_scene interaction-region bbox.
+
+    Sources:
+      - core keypoints only (optional landmarks never affect the extent)
+      - visible or occluded points that have finite coordinates
+    Rule:
+      tight axis-aligned box + max(20 px, 8% of longest side) margin,
+      then expand to at least 96x96 px and clamp to the image.
+    """
+    core_ids = {k["id"] for k in schema if not k.get("optional")}
+    usable = []
+    for kp in keypoints:
+        if kp.get("kp_id") not in core_ids:
+            continue
+        if kp.get("visible") not in (VIS_VISIBLE, VIS_OCCLUDED):
+            continue
+        x, y = kp.get("x"), kp.get("y")
+        if isinstance(x, (int, float)) and isinstance(y, (int, float)):
+            if math.isfinite(x) and math.isfinite(y):
+                usable.append((float(x), float(y)))
+    if not usable or image_width <= 0 or image_height <= 0:
+        return None
+
+    x1 = min(p[0] for p in usable)
+    x2 = max(p[0] for p in usable)
+    y1 = min(p[1] for p in usable)
+    y2 = max(p[1] for p in usable)
+    margin = max(20.0, margin_ratio * max(x2 - x1, y2 - y1))
+    x1, x2 = x1 - margin, x2 + margin
+    y1, y2 = y1 - margin, y2 + margin
+
+    def fit_axis(lo, hi, limit):
+        target = min(float(min_size), float(limit))
+        if hi - lo < target:
+            center = (lo + hi) / 2
+            lo, hi = center - target / 2, center + target / 2
+        lo, hi = max(0.0, lo), min(float(limit), hi)
+        if hi - lo < target:
+            if lo <= 0:
+                hi = min(float(limit), target)
+            else:
+                lo = max(0.0, float(limit) - target)
+        return lo, hi
+
+    x1, x2 = fit_axis(x1, x2, image_width)
+    y1, y2 = fit_axis(y1, y2, image_height)
+    return {"x": x1, "y": y1, "w": x2 - x1, "h": y2 - y1}
+
+
 def annotation_complete(keypoints: list, bbox: dict, schema: list = None):
     """
     A frame counts as `labeled` when every *core* (non-optional) keypoint is
-    addressed and a valid bbox exists.
+    addressed and an automatic bbox can be generated.
       - unset                       -> missing
       - visible without coords       -> missing
-      - occluded (coords) / outside  -> ok
+      - occluded / outside            -> addressed
+      - at least one core visible/occluded point needs coordinates for auto bbox
     Optional keypoints are never required.
     Returns (is_complete, missing_ids) where missing_ids are strings.
     """
     schema = schema or DEFAULT_VIOLIN_SCHEMA
-    optional_ids = {k["id"] for k in schema if k.get("optional")}
     core_ids = {k["id"] for k in schema if not k.get("optional")}
 
     by_id = {k.get("kp_id"): k for k in keypoints}

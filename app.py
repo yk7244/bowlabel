@@ -1,5 +1,5 @@
 """
-app.py - BowLabel v3: master 9-keypoint annotation
+app.py - BowLabel v5: 9-keypoint annotation with automatic interaction bbox
 """
 import json, os, sys, uuid, sqlite3, time
 from pathlib import Path
@@ -13,7 +13,8 @@ from werkzeug.utils import secure_filename
 from database import (get_db, init_db, reset_db, seed_admin,
                       DEFAULT_VIOLIN_SCHEMA, SKELETON_CONNECTIONS, GROUP_LABELS,
                       CLASS_NAME, QUALITY_OPTIONS, VIS_UNSET, VIS_VISIBLE,
-                      BOW_SAMPLES, annotation_complete, coco_visibility)
+                      BOW_SAMPLES, annotation_complete, coco_visibility,
+                      generate_bbox)
 from workflows import setup_project_workflow
 from extractor import allowed_video, get_video_info, extract_frames_async, UPLOADS_DIR, FRAMES_DIR
 from exporter import export_coco, export_yolo_pose, export_csv, export_agreement
@@ -818,7 +819,6 @@ def save_annotation():
     d = request.get_json()
     frame_id = d["frame_id"]
     kps = d["keypoints"]
-    bbox = d.get("bbox")
     meta = d.get("meta")
     notes = d.get("notes", "")
     quality = d.get("quality")
@@ -833,8 +833,11 @@ def save_annotation():
     conn = get_db()
     try:
         frame = conn.execute("""
-            SELECT f.project_id, p.keypoint_schema FROM frames f
-            JOIN projects p ON p.id=f.project_id WHERE f.id=?
+            SELECT f.project_id, p.keypoint_schema, v.width, v.height
+            FROM frames f
+            JOIN videos v ON v.id=f.video_id
+            JOIN projects p ON p.id=f.project_id
+            WHERE f.id=?
         """, (frame_id,)).fetchone()
         if not frame:
             return jsonify({"error": "Frame not found"}), 404
@@ -844,6 +847,11 @@ def save_annotation():
         conn.close()
 
     kps_sorted = sorted(kps, key=lambda k: k.get("kp_id", 0))
+    bbox = generate_bbox(
+        kps_sorted, schema,
+        frame["width"] or 1920,
+        frame["height"] or 1080,
+    )
     complete, missing = annotation_complete(kps_sorted, bbox, schema)
 
     payload_kps = json.dumps(kps_sorted)
@@ -893,7 +901,7 @@ def save_annotation():
     id_to_name = {s["id"]: s.get("label", s["name"]) for s in schema}
     for m in missing:
         if m == "__bbox__":
-            miss_names.append("bbox")
+            miss_names.append("automatic bbox unavailable (no core coordinates)")
         elif m == "__keypoints__":
             miss_names.append("keypoints")
         else:
@@ -904,6 +912,7 @@ def save_annotation():
         "status": new_status,
         "complete": complete,
         "missing": miss_names,
+        "bbox": bbox,
     })
 
 
@@ -978,7 +987,7 @@ if __name__ == "__main__":
         init_db()
     seed_admin("admin", "admin1234")
     print("\n" + "=" * 52)
-    print("  BowLabel v4 — violin_bowing_scene · 9 core keypoints")
+    print("  BowLabel v5 — 9 core keypoints · automatic interaction bbox")
     print("  http://localhost:5050   (admin / admin1234)")
     print("  Reset DB:  python3 app.py --reset")
     print("=" * 52 + "\n")

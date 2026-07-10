@@ -1,7 +1,7 @@
 /**
- * annotate.js v4 — BowLabel labeling canvas
+ * annotate.js v5 — BowLabel labeling canvas
  *
- *  Tools:  Instrument/optional points · Bow (visible-stick polyline) · Box
+ *  Tools:  Instrument/optional points · Bow-axis polyline
  *  Visibility:  0 unset · 1 occluded · 2 visible · 3 outside
  *  Bow:  trace the visible stick centerline (frog→tip); auto-resampled to 5 pts.
  *  Admin opens frames in read-only REVIEW mode (see other labelers' overlays).
@@ -13,9 +13,7 @@ const VIS_NAME = {0: 'unset', 1: 'occluded', 2: 'visible', 3: 'outside'};
 const R_POINT = 7, R_SEL = 11, HIT = 15;
 const MIN_SCALE = 0.1, MAX_SCALE = 24;
 const WHEEL_SENS = 0.0022, ZOOM_STEP = 1.18;
-const HANDLE_HIT = 14;
-const OPP = {tl: 'br', tr: 'bl', bl: 'tr', br: 'tl'};
-const CURS = {tl: 'nwse-resize', br: 'nwse-resize', tr: 'nesw-resize', bl: 'nesw-resize'};
+const BBOX_MARGIN_RATIO = 0.08, BBOX_MIN_SIZE = 96;
 
 // ── schema-derived ───────────────────────────────────────────────────────────
 const DEF = {};                       // id -> def
@@ -30,7 +28,7 @@ const CORE_N     = CORE_IDS.length;
 const pts = {};                       // id -> {x, y, visible}
 SCHEMA.forEach(d => pts[d.id] = {x: null, y: null, visible: VIS_UNSET});
 
-let tool = 'point';                   // 'point' | 'bow' | 'bbox'
+let tool = 'point';                   // 'point' | 'bow'
 let selectedId = POINT_DEFS[0]?.id ?? 0;
 let bbox = null;
 let bowDraft = [];                    // [[x,y],...] image coords being traced
@@ -77,7 +75,6 @@ function loadExisting() {
     if (p.visible === VIS_OUTSIDE) { p.x = null; p.y = null; }
     else if (e.x != null && e.y != null) { p.x = e.x; p.y = e.y; }
   });
-  if (EXISTING.bbox && EXISTING.bbox.w > 0) bbox = {...EXISTING.bbox};
   const meta = EXISTING.meta || {};
   if (meta.bow_polyline && meta.bow_polyline.length >= 2) {
     bowDraft = meta.bow_polyline.map(p => [p[0], p[1]]);
@@ -85,6 +82,7 @@ function loadExisting() {
     bowDraft = BOW_IDS.map(id => [pts[id].x, pts[id].y]);
   }
   bowFinished = BOW_IDS.some(id => hasXY(pts[id]));
+  bbox = calculateAutoBBox();
   const q = document.getElementById('quality'); if (q && EXISTING.quality) q.value = EXISTING.quality;
   const nt = document.getElementById('notes'); if (nt && EXISTING.notes) nt.value = EXISTING.notes;
 }
@@ -112,22 +110,39 @@ function zoomAt(cx, cy, f) {
 }
 function zoomBtn(dir) { zoomAt(canvas.width / 2, canvas.height / 2, dir > 0 ? ZOOM_STEP : 1 / ZOOM_STEP); }
 
-// ── bbox helpers ──────────────────────────────────────────────────────────────
-function corners(b) {
-  return { tl: {x: b.x, y: b.y}, tr: {x: b.x + b.w, y: b.y},
-           bl: {x: b.x, y: b.y + b.h}, br: {x: b.x + b.w, y: b.y + b.h} };
-}
-function bboxFrom(ax, ay, nx, ny) {
-  return { x: Math.min(ax, nx), y: Math.min(ay, ny), w: Math.abs(nx - ax), h: Math.abs(ny - ay) };
-}
-function inBbox(x, y) { return bbox && bbox.w > 0 && x >= bbox.x && x <= bbox.x + bbox.w && y >= bbox.y && y <= bbox.y + bbox.h; }
-function hitHandle(cx, cy) {
-  if (!bbox || bbox.w <= 0 || tool !== 'bbox') return null;
-  for (const [id, pt] of Object.entries(corners(bbox))) {
-    const [hx, hy] = i2c(pt.x, pt.y);
-    if (Math.hypot(cx - hx, cy - hy) < HANDLE_HIT) return id;
+// ── deterministic interaction-region bbox ────────────────────────────────────
+function calculateAutoBBox() {
+  const usable = CORE_IDS.map(id => pts[id]).filter(p =>
+    (p.visible === VIS_VISIBLE || p.visible === VIS_OCCLUDED) && hasXY(p));
+  if (!usable.length) return null;
+
+  let x1 = Math.min(...usable.map(p => p.x));
+  let x2 = Math.max(...usable.map(p => p.x));
+  let y1 = Math.min(...usable.map(p => p.y));
+  let y2 = Math.max(...usable.map(p => p.y));
+  const margin = Math.max(20, BBOX_MARGIN_RATIO * Math.max(x2 - x1, y2 - y1));
+  x1 -= margin; x2 += margin; y1 -= margin; y2 += margin;
+
+  function fitAxis(lo, hi, limit) {
+    const target = Math.min(BBOX_MIN_SIZE, limit);
+    if (hi - lo < target) {
+      const center = (lo + hi) / 2;
+      lo = center - target / 2; hi = center + target / 2;
+    }
+    lo = Math.max(0, lo); hi = Math.min(limit, hi);
+    if (hi - lo < target) {
+      if (lo <= 0) hi = Math.min(limit, target);
+      else lo = Math.max(0, limit - target);
+    }
+    return [lo, hi];
   }
-  return null;
+  [x1, x2] = fitAxis(x1, x2, IMG_W);
+  [y1, y2] = fitAxis(y1, y2, IMG_H);
+  return {x: x1, y: y1, w: x2 - x1, h: y2 - y1};
+}
+
+function refreshAutoBBox() {
+  bbox = calculateAutoBBox();
 }
 
 // ── bow resample ──────────────────────────────────────────────────────────────
@@ -154,6 +169,7 @@ function applyBowResample() {
   const s = resample(bowDraft, BOW_SAMPLES);
   BOW_IDS.forEach((id, i) => { pts[id] = {x: s[i][0], y: s[i][1], visible: VIS_VISIBLE}; });
   bowFinished = true;
+  refreshAutoBBox();
   markDirty();
   return true;
 }
@@ -172,13 +188,6 @@ function redraw() {
     ctx.fillStyle = 'rgba(0,212,255,0.05)';
     ctx.fillRect(bx, by, bbox.w * scale, bbox.h * scale);
     ctx.restore();
-    if (tool === 'bbox' && !REVIEW) {
-      Object.values(corners(bbox)).forEach(pt => {
-        const [hx, hy] = i2c(pt.x, pt.y);
-        ctx.fillStyle = '#00d4ff'; ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5;
-        ctx.beginPath(); ctx.arc(hx, hy, 6, 0, 7); ctx.fill(); ctx.stroke();
-      });
-    }
   }
 
   // skeleton
@@ -279,7 +288,7 @@ function updateMetrics() {
   const mc = document.getElementById('m-core'); if (mc) mc.textContent = core;
   const bar = document.getElementById('m-bar'); if (bar) bar.style.width = Math.round(core / CORE_N * 100) + '%';
   const mb = document.getElementById('m-bbox');
-  if (mb) { const ok = bbox && bbox.w > 0; mb.textContent = ok ? 'bbox ok' : 'bbox needed';
+  if (mb) { const ok = bbox && bbox.w > 0; mb.textContent = ok ? 'auto bbox ready' : 'auto bbox pending';
     mb.style.color = ok ? 'var(--green)' : 'var(--warn)'; }
 }
 
@@ -293,8 +302,6 @@ function updateHint() {
     el.innerHTML = bowFinished
       ? 'Bow set. Drag a point to nudge, or <b>Redraw</b> to trace again.'
       : 'Trace the <b>visible stick</b> (frog→tip): click points, then <b>Enter</b>.';
-  } else {
-    el.innerHTML = 'Box: <b>drag</b> to draw · corners resize · inside to move.';
   }
 }
 
@@ -313,8 +320,13 @@ function setVis(v) {
   if (REVIEW) return;
   const p = pts[selectedId];
   if (v === VIS_VISIBLE && !hasXY(p)) { setStatus('warn', 'click image to place point'); return; }
+  if (v === VIS_OCCLUDED && !hasXY(p)) {
+    setStatus('warn', 'right-click the estimated image position for occluded');
+    return;
+  }
   p.visible = v;
   if (v === VIS_OUTSIDE) { p.x = null; p.y = null; }
+  refreshAutoBBox();
   markDirty(); advancePoint(); redraw(); refreshPanel(); updateMetrics();
 }
 function selectFirstUnaddressed() {
@@ -333,8 +345,13 @@ function finishBow() { if (applyBowResample()) { redraw(); refreshPanel(); updat
   else setStatus('warn', 'place at least 2 points'); }
 function undoBowVertex() { if (!bowFinished && bowDraft.length) { bowDraft.pop(); redraw(); refreshPanel(); } }
 function redrawBow() { bowFinished = false; bowDraft = []; BOW_IDS.forEach(id => pts[id] = {x: null, y: null, visible: VIS_UNSET});
-  markDirty(); redraw(); refreshPanel(); updateMetrics(); }
-function clearBow() { redrawBow(); setStatus('warn', 'bow marked not visible'); }
+  refreshAutoBBox(); markDirty(); redraw(); refreshPanel(); updateMetrics(); }
+function clearBow() {
+  bowFinished = false; bowDraft = [];
+  BOW_IDS.forEach(id => pts[id] = {x: null, y: null, visible: VIS_OUTSIDE});
+  refreshAutoBBox(); markDirty(); redraw(); refreshPanel(); updateMetrics();
+  setStatus('warn', 'bow marked outside / not localizable');
+}
 
 function getHitPoint(cx, cy) {
   const ids = SCHEMA.map(d => d.id).filter(drawable);
@@ -355,17 +372,10 @@ canvas.addEventListener('mousemove', e => {
     const [ix, iy] = c2i(cx, cy);
     if (dragging.type === 'pt') { const [nx, ny] = clampImg(ix, iy); const p = pts[dragging.id];
       p.x = nx; p.y = ny; if (p.visible === VIS_UNSET || p.visible === VIS_OUTSIDE) p.visible = VIS_VISIBLE;
-      markDirty(); redraw(); refreshPanel(); updateMetrics(); return; }
-    if (dragging.type === 'bbox') { const [nx, ny] = clampImg(ix, iy); bbox = bboxFrom(dragging.ax, dragging.ay, nx, ny); markDirty(); redraw(); updateMetrics(); return; }
-    if (dragging.type === 'handle') { const [nx, ny] = clampImg(ix, iy); bbox = bboxFrom(dragging.anchor.x, dragging.anchor.y, nx, ny); markDirty(); redraw(); return; }
-    if (dragging.type === 'move') { const dx = ix - dragging.sx, dy = iy - dragging.sy;
-      let nx = Math.max(0, Math.min(IMG_W - dragging.o.w, dragging.o.x + dx));
-      let ny = Math.max(0, Math.min(IMG_H - dragging.o.h, dragging.o.y + dy));
-      bbox = {x: nx, y: ny, w: dragging.o.w, h: dragging.o.h}; markDirty(); redraw(); return; }
+      refreshAutoBBox(); markDirty(); redraw(); refreshPanel(); updateMetrics(); return; }
   }
 
   if (spaceHeld) canvas.style.cursor = 'grab';
-  else if (tool === 'bbox') { const h = hitHandle(cx, cy); canvas.style.cursor = h ? CURS[h] : inBbox(...c2i(cx, cy)) ? 'move' : 'crosshair'; }
   else canvas.style.cursor = getHitPoint(cx, cy) >= 0 ? 'move' : 'crosshair';
 
   if (tool === 'point' || tool === 'bow') redraw();
@@ -379,14 +389,6 @@ canvas.addEventListener('mousedown', e => {
     panning = {cx, cy, ox: offX, oy: offY}; canvas.style.cursor = 'grabbing'; e.preventDefault(); return;
   }
   if (REVIEW || e.button !== 0) return;
-
-  if (tool === 'bbox') {
-    const h = hitHandle(cx, cy);
-    if (h && bbox) { dragging = {type: 'handle', anchor: corners(bbox)[OPP[h]]}; return; }
-    if (inBbox(ix, iy) && bbox) { dragging = {type: 'move', sx: ix, sy: iy, o: {...bbox}}; return; }
-    const [nx, ny] = clampImg(ix, iy);
-    dragging = {type: 'bbox', ax: nx, ay: ny}; bbox = {x: nx, y: ny, w: 0, h: 0}; markDirty(); return;
-  }
 
   // point/bow: dragging an existing point
   const hit = getHitPoint(cx, cy);
@@ -406,11 +408,10 @@ canvas.addEventListener('mousedown', e => {
   if (p.visible === VIS_OUTSIDE) return;
   const [nx, ny] = clampImg(ix, iy);
   p.x = nx; p.y = ny; p.visible = VIS_VISIBLE;
-  markDirty(); redraw(); refreshPanel(); updateMetrics(); advancePoint();
+  refreshAutoBBox(); markDirty(); redraw(); refreshPanel(); updateMetrics(); advancePoint();
 });
 
 canvas.addEventListener('mouseup', () => {
-  if (dragging?.type === 'bbox' && bbox && (bbox.w < 6 || bbox.h < 6)) { bbox = null; setStatus('warn', 'bbox too small'); }
   dragging = null;
   if (panning) { panning = null; }
   redraw(); updateMetrics();
@@ -425,9 +426,14 @@ canvas.addEventListener('contextmenu', e => {
     const p = pts[hit];
     p.visible = p.visible === VIS_OCCLUDED ? VIS_VISIBLE : VIS_OCCLUDED;
     if (POINT_DEFS.some(d => d.id === hit)) { selectedId = hit; }
+    refreshAutoBBox();
     markDirty(); redraw(); refreshPanel(); updateMetrics();
   } else if (tool === 'point') {
-    setVis(VIS_OCCLUDED);
+    const [ix, iy] = c2i(cx, cy);
+    const [nx, ny] = clampImg(ix, iy);
+    pts[selectedId] = {x: nx, y: ny, visible: VIS_OCCLUDED};
+    refreshAutoBBox();
+    markDirty(); advancePoint(); redraw(); refreshPanel(); updateMetrics();
   }
 });
 
@@ -460,7 +466,6 @@ document.addEventListener('keydown', e => {
     case 's': case 'S': e.preventDefault(); saveAnnotation(false); return;
     case 'c': case 'C': copyFromPrev(); return;
     case 'b': case 'B': setTool('bow'); return;
-    case 'n': case 'N': setTool('bbox'); return;
     case 'v': case 'V': setVis(VIS_VISIBLE); return;
     case 'o': case 'O': setVis(VIS_OCCLUDED); return;
     case 'x': case 'X': setVis(VIS_OUTSIDE); return;
@@ -484,7 +489,7 @@ function getMissing() {
     if (!addressed(id)) miss.push(DEF[id].label);
     else if (pts[id].visible === VIS_VISIBLE && !hasXY(pts[id])) miss.push(DEF[id].label + ' (no coords)');
   });
-  if (!bbox || bbox.w <= 0) miss.push('bbox');
+  if (!bbox || bbox.w <= 0) miss.push('automatic bbox (no core coordinates)');
   return miss;
 }
 
@@ -497,7 +502,7 @@ function buildPayload() {
       y: hasXY(pts[d.id]) ? pts[d.id].y : null,
       visible: pts[d.id].visible,
     })),
-    bbox: (bbox && bbox.w > 0) ? bbox : null,
+    bbox: calculateAutoBBox(),
     meta: {bow_polyline: bowFinished && bowDraft.length >= 2 ? bowDraft : null},
     notes: document.getElementById('notes')?.value || '',
     quality: document.getElementById('quality')?.value || null,
@@ -511,6 +516,7 @@ async function saveToServer() {
     const r = await fetch('/api/annotations', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(buildPayload())});
     let d = {}; try { d = await r.json(); } catch (_) {}
     if (!r.ok) throw new Error(d.error || `save failed (${r.status})`);
+    bbox = d.bbox || calculateAutoBBox();
     dirty = false;
     return d;
   })();
@@ -541,9 +547,9 @@ async function copyFromPrev() {
     if (!d || !d.keypoints) { setStatus('warn', 'no previous annotation'); return; }
     d.keypoints.forEach(e => { const p = pts[e.kp_id]; if (!p || e.visible === VIS_UNSET) return;
       p.visible = e.visible; if (e.visible === VIS_OUTSIDE) { p.x = null; p.y = null; } else { p.x = e.x; p.y = e.y; } });
-    if (d.bbox && d.bbox.w > 0) bbox = {...d.bbox};
     if (d.meta && d.meta.bow_polyline) { bowDraft = d.meta.bow_polyline.map(p => [p[0], p[1]]); bowFinished = true; }
     else bowFinished = BOW_IDS.some(id => hasXY(pts[id]));
+    refreshAutoBBox();
     markDirty(); selectFirstUnaddressed(); redraw(); refreshPanel(); updateMetrics();
     setStatus('ok', 'copied previous');
   } catch (e) { setStatus('error', e.message); }

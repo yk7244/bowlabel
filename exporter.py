@@ -6,7 +6,8 @@ import csv
 import zipfile
 import shutil
 from pathlib import Path
-from database import get_db, SKELETON_CONNECTIONS, CLASS_NAME, coco_visibility
+from database import (get_db, SKELETON_CONNECTIONS, CLASS_NAME,
+                      coco_visibility, generate_bbox)
 
 
 def _split_schema(schema):
@@ -67,7 +68,8 @@ def export_coco(project_id: int, main_only: bool = True) -> str:
             "batch_type": row["batch_type"],
             "labeled_by": row["username"],
         })
-        lut = _kp_lookup(json.loads(row["keypoints"]))
+        kps_raw = json.loads(row["keypoints"])
+        lut = _kp_lookup(kps_raw)
         coco_kps = []
         num_vis = 0
         for kdef in core:
@@ -76,7 +78,7 @@ def export_coco(project_id: int, main_only: bool = True) -> str:
             coco_kps += [kp.get("x") or 0, kp.get("y") or 0, v]
             if v > 0:
                 num_vis += 1
-        bbox = json.loads(row["bbox"]) if row["bbox"] else {"x": 0, "y": 0, "w": 0, "h": 0}
+        bbox = generate_bbox(kps_raw, schema, W, H) or {"x": 0, "y": 0, "w": 0, "h": 0}
         annotations_list.append({
             "id": i,
             "image_id": img_id,
@@ -90,7 +92,7 @@ def export_coco(project_id: int, main_only: bool = True) -> str:
         })
 
     coco = {
-        "info": {"description": proj["name"], "version": "3.0", "class": class_name},
+        "info": {"description": proj["name"], "version": "5.0", "class": class_name},
         "categories": [{
             "id": 1, "name": class_name,
             "keypoints": kp_names,
@@ -121,8 +123,11 @@ def export_yolo_pose(project_id: int, main_only: bool = True) -> str:
 
     for row in rows:
         W, H = row["width"] or 1920, row["height"] or 1080
-        lut = _kp_lookup(json.loads(row["keypoints"]))
-        bbox = json.loads(row["bbox"]) if row["bbox"] else {"x": 0, "y": 0, "w": W, "h": H}
+        kps_raw = json.loads(row["keypoints"])
+        lut = _kp_lookup(kps_raw)
+        bbox = generate_bbox(kps_raw, schema, W, H)
+        if not bbox:
+            continue
         cx = (bbox["x"] + bbox["w"] / 2) / W
         cy = (bbox["y"] + bbox["h"] / 2) / H
         bw = bbox["w"] / W
@@ -176,8 +181,13 @@ def export_csv(project_id: int, main_only: bool = True) -> str:
         w = csv.writer(f)
         w.writerow(header)
         for row in rows:
-            lut = _kp_lookup(json.loads(row["keypoints"]))
-            bbox = json.loads(row["bbox"]) if row["bbox"] else {}
+            kps_raw = json.loads(row["keypoints"])
+            lut = _kp_lookup(kps_raw)
+            bbox = generate_bbox(
+                kps_raw, schema,
+                row["width"] or 1920,
+                row["height"] or 1080,
+            ) or {}
             line = [row["video_id"], row["filename"], row["frame_index"],
                     row["batch_type"], row["username"], row["quality"], row["notes"]]
             for kdef in schema:

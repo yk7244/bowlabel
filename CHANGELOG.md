@@ -4,6 +4,40 @@
 
 ---
 
+## 2026-07-10 — v5 자동 interaction bbox + bow-axis 명칭 정리
+
+**커밋:** `v5: core keypoint 기반 interaction bbox 자동 생성`
+
+### 배경
+- Technology probe 단계에서 수동 bbox는 의미적 이득보다 라벨러 간 object extent 편차가 큼
+- 모델의 관심 대상은 사람 전체나 바이올린 단독이 아니라 악기 기준점과 보이는 활축을 포함한
+  `violin_bowing_scene` interaction region
+- `bow_visible_stick_*` 이름을 최종 연구 용어인 `bow_axis_visible_*`로 명확히 변경
+
+### 변경 내용
+
+#### 자동 bbox (`database.py`, `app.py`, `annotate.js`)
+- 수동 Box 도구와 bbox 드래그/resize/move 코드 전부 제거
+- core 9점 중 좌표가 있는 `visible`/`occluded`만 사용 (optional 3점 제외)
+- 최소 외접 사각형 + `max(20px, 긴 변의 8%)` margin
+- 최소 `96×96px` 보정 후 이미지 경계 clamp
+- 브라우저는 실시간 preview, **서버가 저장 시 동일 규칙으로 authoritative bbox 재계산**
+- API가 bbox를 반환해 클라이언트 preview와 저장 결과를 동기화
+- export도 저장된 수동 bbox 대신 keypoint에서 다시 계산해 일관성 보장
+
+#### 스키마 명칭 (`database.py`) — SCHEMA_VERSION 4 → 5
+- ids 4–8: `bow_visible_stick_*` → `bow_axis_visible_*`
+- id/좌표 의미는 유지되므로 기존 v4 project schema는 서버 시작 시 자동 이름 마이그레이션
+- DB reset 불필요
+
+#### UI/visibility
+- 탭을 **Instrument · Bow** 2개로 단순화하고 `auto bbox ready/pending` 표시
+- 빈 화면 우클릭 시 선택 keypoint를 해당 좌표에 `occluded`로 배치
+- 좌표 없는 occluded 버튼은 잘못 완료되지 않도록 위치 우클릭 안내
+- Bow `Not visible`은 bow core 5점을 `outside`로 처리
+
+---
+
 ## 2026-07-10 — v4.1 다중 영상 배분·갤러리 관리 개선
 
 **커밋:** `다중영상 업로드/배분 개선, 배분 현황·재배정, 갤러리 프레임 삭제`

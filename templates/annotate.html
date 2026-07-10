@@ -126,7 +126,7 @@ select.labeler-sel { background: var(--bg-elevated); color: var(--text); border:
   {% if not review_mode %}
   <span class="an-metric"><b id="m-core">0</b>/{{ (schema|selectattr('optional','undefined')|list|length) }} core</span>
   <div class="progress-mini"><div id="m-bar"></div></div>
-  <span class="an-metric" id="m-bbox">bbox needed</span>
+  <span class="an-metric" id="m-bbox">auto bbox pending</span>
   <span id="save-status" class="save-status"></span>
   {% endif %}
 
@@ -157,7 +157,6 @@ select.labeler-sel { background: var(--bg-elevated); color: var(--text); border:
     <div class="an-tabs">
       <div class="an-tab active" data-tool="point" onclick="setTool('point')">Instrument</div>
       <div class="an-tab" data-tool="bow" onclick="setTool('bow')">Bow</div>
-      <div class="an-tab" data-tool="bbox" onclick="setTool('bbox')">Box</div>
     </div>
     {% endif %}
 
@@ -224,7 +223,8 @@ select.labeler-sel { background: var(--bg-elevated); color: var(--text); border:
       </div>
       <div class="shortcut">
         click=place · drag=move · right-click=occluded · V/O/X visibility<br>
-        1–9 select · B bow · N box · Space/Alt+drag pan · +/− zoom · Enter save+next
+        1–9 select · B bow · Space/Alt+drag pan · +/− zoom · Enter save+next<br>
+        bbox is generated automatically from core landmarks
       </div>
     </div>
     {% endif %}
@@ -247,5 +247,5 @@ const PREV_ID = {{ prev_id or 'null' }};
 </script>
 {% endblock %}
 {% block scripts %}
-<script src="{{ url_for('static', filename='js/annotate.js') }}?v=40"></script>
+<script src="{{ url_for('static', filename='js/annotate.js') }}?v=50"></script>
 {% endblock %}
