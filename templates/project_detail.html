@@ -90,12 +90,12 @@
   <div class="assign-box">
     <h4 style="margin-bottom:10px">워크플로 배분</h4>
     <p class="muted" style="margin-bottom:12px;font-size:13px;line-height:1.6">
-      <strong>Pilot</strong>: 앞 N장 → 선택한 라벨러 <em>전원</em>이 각각 9점 라벨링 (agreement)<br>
-      <strong>Main</strong>: 나머지 → 라벨러별 균등 분배, 각자 맡은 장마다 9점 전부
+      <strong>Pilot</strong>: 전체 프레임에서 <em>고르게 샘플한 N장</em> → 선택 라벨러 전원이 라벨링 (영상 여러 개면 각 영상에서 골고루 뽑힘)<br>
+      <strong>Main</strong>: 나머지 → 라벨러별 균등 분배
     </p>
     <div class="form-group" style="max-width:200px">
-      <label>Pilot 프레임 수</label>
-      <input type="number" id="pilot-count" value="{{ proj.pilot_count or 20 }}" min="1" max="500">
+      <label>Pilot 프레임 수 (전체 재배분 시)</label>
+      <input type="number" id="pilot-count" value="{{ proj.pilot_count or 20 }}" min="0" max="1000">
     </div>
     <div class="form-row" style="flex-wrap:wrap;gap:10px;margin:12px 0">
       {% for u in users %}
@@ -107,8 +107,20 @@
       <span class="muted">라벨러 없음 — 대시보드에서 추가</span>
       {% endfor %}
     </div>
-    <button class="btn-primary" onclick="setupWorkflow()">배분 실행</button>
+    <div class="form-row" style="gap:8px">
+      <button class="btn-secondary" onclick="setupWorkflow('incremental')" title="기존 배분/진행 유지, 새로 추가된 프레임만 배분">
+        ➕ 새 프레임만 추가 배분
+      </button>
+      <button class="btn-primary" onclick="setupWorkflow('reset')" title="전체를 pilot/main으로 다시 나눔 (진행상태는 보존)">
+        ♻️ 전체 재배분
+      </button>
+    </div>
     <div id="assign-result" style="margin-top:12px;font-size:13px"></div>
+
+    <hr style="border-color:var(--border);margin:18px 0">
+    <h4 style="margin-bottom:10px">현재 배분 현황</h4>
+    <div id="dist-user" class="muted" style="font-size:13px">로딩 중…</div>
+    <div id="dist-video" style="margin-top:14px"></div>
   </div>
 </div>
 
@@ -202,53 +214,60 @@ function showTab(id) {
   event.target.classList.add('active');
 }
 
-// Upload
+// Upload (supports multiple files, uploaded sequentially)
 const fileInput = document.getElementById('file-input');
 fileInput.addEventListener('change', () => {
-  if (!fileInput.files.length) return;
-  uploadFile(fileInput.files[0]);
+  if (fileInput.files.length) uploadQueue([...fileInput.files]);
 });
-function uploadFile(file) {
-  const fd = new FormData();
-  fd.append('video', file);
-  fd.append('player_id',     document.getElementById('player-id').value||'unknown');
-  fd.append('session_label', document.getElementById('session-label').value||'');
-  fd.append('notes',         document.getElementById('notes').value||'');
 
+function uploadOne(file, idx, total) {
+  return new Promise((resolve, reject) => {
+    const fd = new FormData();
+    fd.append('video', file);
+    fd.append('player_id',     document.getElementById('player-id').value||'unknown');
+    fd.append('session_label', document.getElementById('session-label').value||'');
+    fd.append('notes',         document.getElementById('notes').value||'');
+    const bar  = document.getElementById('upload-bar');
+    const stat = document.getElementById('upload-status');
+    const xhr = new XMLHttpRequest();
+    xhr.upload.onprogress = e => {
+      if (e.lengthComputable) {
+        const pct = Math.round(e.loaded/e.total*100);
+        bar.style.width = pct+'%';
+        stat.textContent = `(${idx+1}/${total}) ${file.name} — ${pct}%`;
+      }
+    };
+    xhr.onload = () => {
+      try { const res = JSON.parse(xhr.responseText);
+        if (xhr.status===200) resolve(res); else reject(res.error||'unknown'); }
+      catch(_) { reject('bad response'); }
+    };
+    xhr.onerror = () => reject('network error');
+    xhr.open('POST', `/admin/projects/${PID}/upload`);
+    xhr.send(fd);
+  });
+}
+
+async function uploadQueue(files) {
   const prog = document.getElementById('upload-progress');
-  const bar  = document.getElementById('upload-bar');
   const stat = document.getElementById('upload-status');
   prog.classList.remove('hidden');
-
-  const xhr = new XMLHttpRequest();
-  xhr.upload.onprogress = e => {
-    if (e.lengthComputable) {
-      const pct = Math.round(e.loaded/e.total*100);
-      bar.style.width = pct+'%';
-      stat.textContent = `업로드 중... ${pct}%  (${(e.loaded/1024/1024).toFixed(1)}MB)`;
-    }
-  };
-  xhr.onload = () => {
-    const res = JSON.parse(xhr.responseText);
-    if (xhr.status===200) {
-      stat.textContent = `✅ 업로드 완료! (video_id: ${res.video_id})  영상 목록 탭에서 확인하세요.`;
-      bar.style.width = '100%';
-      setTimeout(()=>location.reload(), 2000);
-    } else {
-      stat.textContent = '❌ 업로드 실패: ' + (res.error||'unknown error');
-    }
-  };
-  xhr.open('POST', `/admin/projects/${PID}/upload`);
-  xhr.send(fd);
+  let done = 0;
+  for (let i=0;i<files.length;i++) {
+    try { await uploadOne(files[i], i, files.length); done++; }
+    catch(err) { stat.textContent = `❌ ${files[i].name} 실패: ${err}`; }
+  }
+  stat.textContent = `✅ ${done}/${files.length} 업로드 완료. 잠시 후 새로고침…`;
+  setTimeout(()=>location.reload(), 1500);
 }
-// Drag & Drop
+
+// Drag & Drop (multiple)
 const uploadBox = document.getElementById('upload-box');
 uploadBox.addEventListener('dragover', e=>{e.preventDefault();uploadBox.classList.add('drag-over');});
 uploadBox.addEventListener('dragleave', ()=>uploadBox.classList.remove('drag-over'));
 uploadBox.addEventListener('drop', e=>{
   e.preventDefault(); uploadBox.classList.remove('drag-over');
-  const file = e.dataTransfer.files[0];
-  if (file) uploadFile(file);
+  if (e.dataTransfer.files.length) uploadQueue([...e.dataTransfer.files]);
 });
 
 // Extract modal
@@ -271,19 +290,75 @@ document.getElementById('form-extract').addEventListener('submit', e=>{
 });
 
 // Assign
-function setupWorkflow() {
+function setupWorkflow(mode) {
   const ids = [...document.querySelectorAll('.assign-user:checked')].map(e=>+e.value);
-  const pilot = +document.getElementById('pilot-count').value || 20;
+  const pilot = +document.getElementById('pilot-count').value || 0;
   if (!ids.length) { alert('라벨러 1명 이상 선택'); return; }
-  if (!confirm(`Pilot ${pilot}장(전원) + Main 균등 배분?`)) return;
+  const msg = mode==='incremental'
+    ? '새로 추가된(미배정) 프레임만 선택 라벨러에게 균등 배분합니다. 기존 배분/진행은 유지됩니다. 계속?'
+    : `전체를 다시 나눕니다. Pilot ${pilot}장(전원) + Main 균등 배분. (진행상태는 보존) 계속?`;
+  if (!confirm(msg)) return;
   fetch(`/admin/projects/${PID}/setup-workflow`, {
     method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({user_ids: ids, pilot_count: pilot})
+    body: JSON.stringify({user_ids: ids, pilot_count: pilot, mode: mode})
   }).then(r=>r.json()).then(d=>{
     if (d.error) { alert(d.error); return; }
-    document.getElementById('assign-result').innerHTML =
-      `✅ 총 ${d.total}장 — Pilot ${d.pilot}장(×${d.labelers}명) + Main ${d.main}장`;
-    loadStats();
+    document.getElementById('assign-result').innerHTML = d.mode==='incremental'
+      ? `✅ 새 프레임 ${d.added}장을 ${d.labelers}명에게 추가 배분`
+      : `✅ 총 ${d.total}장 — Pilot ${d.pilot}장(×${d.labelers}명) + Main ${d.main}장`;
+    loadStats(); loadDistribution();
+  });
+}
+
+// Distribution overview
+function loadDistribution() {
+  fetch(`/api/projects/${PID}/assignments`).then(r=>r.json()).then(d=>{
+    const bu = d.by_user||[];
+    const byUserEl = document.getElementById('dist-user');
+    if (!bu.length) { byUserEl.textContent = '아직 배분되지 않았습니다.'; }
+    else {
+      byUserEl.innerHTML = '<div class="stats-row">' + bu.map(u=>
+        `<span class="stat-pill">${u.username} [${u.batch_type}] <b>${u.done}/${u.total}</b></span>`
+      ).join('') + '</div>';
+    }
+    // per-video with reassign
+    const labelers = {{ users|map(attribute='id')|list|tojson }};
+    const labelerNames = {{ users|map(attribute='username')|list|tojson }};
+    const optHtml = labelers.map((id,i)=>`<option value="${id}">${labelerNames[i]}</option>`).join('');
+    const vmap = {};
+    (d.video_user||[]).forEach(r=>{ (vmap[r.video_id]=vmap[r.video_id]||[]).push(r); });
+    const rows = (d.by_video||[]).map(v=>{
+      const who = (vmap[v.video_id]||[]).map(r=>`${r.username}[${r.batch_type}]:${r.n}`).join(' · ') || '<span class="muted">미배정</span>';
+      const warn = v.unassigned>0 ? `<span class="badge badge-warn">미배정 ${v.unassigned}</span>` : '';
+      return `<tr>
+        <td>#${v.video_id}</td>
+        <td>${(v.original_name||'').slice(0,26)}</td>
+        <td>${v.frames||0} <span class="muted">(pilot ${v.pilot||0})</span> ${warn}</td>
+        <td style="font-size:12px">${who}</td>
+        <td>
+          <select id="vre-${v.video_id}" style="font-size:12px"><option value="">main 재배정…</option>${optHtml}</select>
+          <button class="btn-sm btn-secondary" onclick="reassignVideo(${v.video_id})">이동</button>
+        </td></tr>`;
+    }).join('');
+    document.getElementById('dist-video').innerHTML = `
+      <div class="table-wrap"><table class="data-table">
+      <thead><tr><th>영상</th><th>파일</th><th>프레임</th><th>담당(영상별)</th><th>main 재배정</th></tr></thead>
+      <tbody>${rows||'<tr><td colspan=5 class="muted">영상 없음</td></tr>'}</tbody>
+      </table></div>`;
+  });
+}
+loadDistribution();
+
+function reassignVideo(vid) {
+  const uid = document.getElementById(`vre-${vid}`).value;
+  if (!uid) { alert('대상 라벨러를 선택하세요.'); return; }
+  if (!confirm(`영상 #${vid} 의 main 프레임을 해당 라벨러에게 모두 이동할까요?`)) return;
+  fetch(`/admin/videos/${vid}/reassign`, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({user_id:+uid})
+  }).then(r=>r.json()).then(d=>{
+    if (d.error) { alert(d.error); return; }
+    alert(`${d.moved}장 이동됨`); loadStats(); loadDistribution();
   });
 }
 

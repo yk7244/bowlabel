@@ -348,29 +348,37 @@ def frame_gallery(pid):
     if not proj:
         abort(404)
     batch_filter = request.args.get("batch", "all")
+    video_filter = request.args.get("video", "all")
     page = max(1, int(request.args.get("page", 1)))
     per = 60
     where, params = ["f.project_id=?"], [pid]
     if batch_filter != "all":
         where.append("f.batch_type=?")
         params.append(batch_filter)
+    if video_filter != "all":
+        where.append("f.video_id=?")
+        params.append(int(video_filter))
     where_sql = " AND ".join(where)
     total = conn.execute(f"SELECT COUNT(*) FROM frames f WHERE {where_sql}", params).fetchone()[0]
     frames = conn.execute(f"""
         SELECT f.*, v.original_name,
                (SELECT COUNT(*) FROM frame_assignments fa WHERE fa.frame_id=f.id
                 AND fa.status IN ('labeled','reviewed')) AS done_assignments,
-               (SELECT COUNT(*) FROM frame_assignments fa WHERE fa.frame_id=f.id) AS total_assignments
+               (SELECT COUNT(*) FROM frame_assignments fa WHERE fa.frame_id=f.id) AS total_assignments,
+               (SELECT GROUP_CONCAT(u.username, ', ') FROM frame_assignments fa
+                JOIN users u ON u.id=fa.user_id WHERE fa.frame_id=f.id) AS assignees
         FROM frames f JOIN videos v ON v.id=f.video_id
         WHERE {where_sql}
         ORDER BY f.video_id, f.frame_index
         LIMIT ? OFFSET ?
     """, params + [per, (page - 1) * per]).fetchall()
     videos = conn.execute("SELECT id, original_name FROM videos WHERE project_id=?", (pid,)).fetchall()
+    labelers = conn.execute("SELECT id, username FROM users WHERE role='labeler' AND is_active=1").fetchall()
     conn.close()
     return render_template("frame_gallery.html",
-                           proj=proj, frames=frames, videos=videos,
-                           batch_filter=batch_filter, page=page, per=per,
+                           proj=proj, frames=frames, videos=videos, labelers=labelers,
+                           batch_filter=batch_filter, video_filter=video_filter,
+                           page=page, per=per,
                            total=total, pages=(total + per - 1) // per)
 
 
@@ -381,11 +389,161 @@ def setup_workflow(pid):
     data = request.get_json() or {}
     uids = data.get("user_ids", [])
     pilot_count = int(data.get("pilot_count", 20))
+    mode = data.get("mode", "reset")
     try:
-        result = setup_project_workflow(pid, uids, pilot_count)
+        result = setup_project_workflow(pid, uids, pilot_count, mode=mode)
         return jsonify({"ok": True, **result})
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/projects/<int:pid>/assignments")
+@login_required
+@admin_required
+def assignment_overview(pid):
+    """Who has what: per-labeler and per-video breakdown."""
+    conn = get_db()
+    by_user = conn.execute("""
+        SELECT u.id AS user_id, u.username, f.batch_type,
+               COUNT(*) AS total,
+               SUM(CASE WHEN fa.status IN ('labeled','reviewed') THEN 1 ELSE 0 END) AS done
+        FROM frame_assignments fa
+        JOIN frames f ON f.id=fa.frame_id
+        JOIN users u ON u.id=fa.user_id
+        WHERE f.project_id=?
+        GROUP BY u.id, f.batch_type
+        ORDER BY u.username, f.batch_type
+    """, (pid,)).fetchall()
+    by_video = conn.execute("""
+        SELECT v.id AS video_id, v.original_name, v.player_id,
+               COUNT(DISTINCT f.id) AS frames,
+               SUM(CASE WHEN f.batch_type='pilot' THEN 1 ELSE 0 END) AS pilot,
+               COUNT(DISTINCT CASE WHEN fa.frame_id IS NULL THEN f.id END) AS unassigned
+        FROM videos v
+        LEFT JOIN frames f ON f.video_id=v.id
+        LEFT JOIN frame_assignments fa ON fa.frame_id=f.id
+        WHERE v.project_id=?
+        GROUP BY v.id
+        ORDER BY v.id
+    """, (pid,)).fetchall()
+    video_user = conn.execute("""
+        SELECT f.video_id, u.username, f.batch_type, COUNT(*) AS n
+        FROM frame_assignments fa
+        JOIN frames f ON f.id=fa.frame_id
+        JOIN users u ON u.id=fa.user_id
+        WHERE f.project_id=?
+        GROUP BY f.video_id, u.id, f.batch_type
+        ORDER BY f.video_id, u.username
+    """, (pid,)).fetchall()
+    conn.close()
+    return jsonify({
+        "by_user": [dict(r) for r in by_user],
+        "by_video": [dict(r) for r in by_video],
+        "video_user": [dict(r) for r in video_user],
+    })
+
+
+@app.route("/admin/videos/<int:vid>/reassign", methods=["POST"])
+@login_required
+@admin_required
+def reassign_video(vid):
+    """Move all MAIN frames of a video to a single labeler (keeps annotations)."""
+    data = request.get_json() or {}
+    new_uid = data.get("user_id")
+    if not new_uid:
+        return jsonify({"error": "user_id required"}), 400
+    conn = get_db()
+    frames = conn.execute(
+        "SELECT id FROM frames WHERE video_id=? AND batch_type='main'", (vid,)
+    ).fetchall()
+    moved = 0
+    for f in frames:
+        cur = conn.execute(
+            "SELECT status FROM frame_assignments WHERE frame_id=? AND user_id=?",
+            (f["id"], new_uid)
+        ).fetchone()
+        keep = cur["status"] if cur else "unlabeled"
+        conn.execute("DELETE FROM frame_assignments WHERE frame_id=?", (f["id"],))
+        conn.execute(
+            "INSERT INTO frame_assignments (frame_id, user_id, status) VALUES (?,?,?)",
+            (f["id"], new_uid, keep))
+        moved += 1
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True, "moved": moved})
+
+
+@app.route("/admin/frames/<int:fid>/reassign", methods=["POST"])
+@login_required
+@admin_required
+def reassign_frame(fid):
+    """Reassign a single MAIN frame to a labeler."""
+    data = request.get_json() or {}
+    new_uid = data.get("user_id")
+    if not new_uid:
+        return jsonify({"error": "user_id required"}), 400
+    conn = get_db()
+    fr = conn.execute("SELECT batch_type FROM frames WHERE id=?", (fid,)).fetchone()
+    if not fr:
+        conn.close()
+        return jsonify({"error": "frame not found"}), 404
+    if fr["batch_type"] == "pilot":
+        conn.close()
+        return jsonify({"error": "pilot frames are labeled by everyone; skipped", "skipped": True}), 200
+    cur = conn.execute(
+        "SELECT status FROM frame_assignments WHERE frame_id=? AND user_id=?",
+        (fid, new_uid)
+    ).fetchone()
+    keep = cur["status"] if cur else "unlabeled"
+    conn.execute("DELETE FROM frame_assignments WHERE frame_id=?", (fid,))
+    conn.execute(
+        "INSERT INTO frame_assignments (frame_id, user_id, status) VALUES (?,?,?)",
+        (fid, new_uid, keep))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
+
+
+def _delete_frames(frame_ids):
+    """Delete frames + their annotations/assignments + image files on disk."""
+    if not frame_ids:
+        return 0
+    conn = get_db()
+    ph = ",".join("?" * len(frame_ids))
+    rows = conn.execute(
+        f"SELECT id, video_id, filename FROM frames WHERE id IN ({ph})", frame_ids
+    ).fetchall()
+    conn.execute(f"DELETE FROM annotations WHERE frame_id IN ({ph})", frame_ids)
+    conn.execute(f"DELETE FROM frame_assignments WHERE frame_id IN ({ph})", frame_ids)
+    conn.execute(f"DELETE FROM frames WHERE id IN ({ph})", frame_ids)
+    conn.commit()
+    conn.close()
+    for r in rows:
+        fp = FRAMES_DIR / str(r["video_id"]) / r["filename"]
+        if fp.exists():
+            try:
+                fp.unlink()
+            except OSError:
+                pass
+    return len(rows)
+
+
+@app.route("/admin/frames/<int:fid>/delete", methods=["POST"])
+@login_required
+@admin_required
+def delete_frame(fid):
+    n = _delete_frames([fid])
+    return jsonify({"ok": True, "deleted": n})
+
+
+@app.route("/admin/frames/delete", methods=["POST"])
+@login_required
+@admin_required
+def delete_frames_bulk():
+    data = request.get_json() or {}
+    ids = [int(i) for i in data.get("frame_ids", [])]
+    n = _delete_frames(ids)
+    return jsonify({"ok": True, "deleted": n})
 
 
 @app.route("/admin/projects/<int:pid>/export/<fmt>")

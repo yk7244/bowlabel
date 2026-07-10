@@ -1,32 +1,85 @@
 {% extends "base.html" %}
 {% block title %}갤러리 — {{ proj.name }}{% endblock %}
+{% block head %}
+<style>
+.gal-toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px;
+  padding: 10px 12px; margin-bottom: 14px; position: sticky; top: 60px; z-index: 20; }
+.gal-toolbar select { background: var(--bg-base); color: var(--text); border: 1px solid var(--border);
+  border-radius: 7px; padding: 6px 9px; font-size: 13px; }
+.gal-toolbar .spacer { flex: 1; }
+.gal-count { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text-muted); }
+.sel-count { color: var(--accent2); font-weight: 600; }
+.frame-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+.fcard { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px;
+  overflow: hidden; position: relative; }
+.fcard.selected { border-color: var(--accent2); box-shadow: 0 0 0 1px var(--accent2); }
+.fcard .thumb { display: block; position: relative; aspect-ratio: 16/9; background: #05050c; }
+.fcard .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.fcard .chk { position: absolute; top: 6px; left: 6px; width: 20px; height: 20px; z-index: 3; cursor: pointer; }
+.fcard .b-batch { position: absolute; top: 6px; right: 6px; font-family: 'JetBrains Mono', monospace;
+  font-size: 9px; padding: 2px 6px; border-radius: 5px; background: rgba(0,0,0,.6); color: #ccc; }
+.fcard .b-batch.pilot { color: #c4b5fd; } .fcard .b-batch.main { color: #67e8f9; }
+.fcard .b-done { position: absolute; bottom: 6px; right: 6px; font-size: 9px; padding: 2px 6px;
+  border-radius: 5px; background: rgba(0,0,0,.65); }
+.fcard .meta { padding: 7px 8px; font-size: 11px; }
+.fcard .meta .idx { font-family: 'JetBrains Mono', monospace; color: var(--text); }
+.fcard .meta .who { color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fcard .row2 { display: flex; gap: 4px; padding: 0 8px 8px; }
+.fcard .row2 .btn-sm { flex: 1; padding: 4px; font-size: 10px; }
+.del-btn { color: var(--red); }
+</style>
+{% endblock %}
 {% block content %}
 <div class="page-header">
-  <h2>{{ proj.name }}</h2>
+  <h2>{{ proj.name }} — 갤러리</h2>
   <a href="{{ url_for('project_detail', pid=proj.id) }}" class="btn-secondary">← 프로젝트</a>
 </div>
 
-<form class="filter-bar" method="get">
-  <select name="batch" onchange="this.form.submit()">
-    <option value="all" {% if batch_filter=='all' %}selected{% endif %}>전체</option>
+<div class="gal-toolbar">
+  <select id="f-video" onchange="applyFilters()">
+    <option value="all" {% if video_filter=='all' %}selected{% endif %}>전체 영상</option>
+    {% for v in videos %}
+    <option value="{{ v.id }}" {% if video_filter|string==v.id|string %}selected{% endif %}>#{{ v.id }} {{ v.original_name[:24] }}</option>
+    {% endfor %}
+  </select>
+  <select id="f-batch" onchange="applyFilters()">
+    <option value="all" {% if batch_filter=='all' %}selected{% endif %}>전체 배치</option>
     <option value="pilot" {% if batch_filter=='pilot' %}selected{% endif %}>Pilot</option>
     <option value="main" {% if batch_filter=='main' %}selected{% endif %}>Main</option>
   </select>
-  <span class="muted">{{ total }}장</span>
-</form>
+  <span class="gal-count">{{ total }}장 · <span class="sel-count" id="sel-count">0</span> 선택</span>
+
+  <span class="spacer"></span>
+
+  <button class="btn-sm btn-secondary" onclick="toggleAllPage()">페이지 전체선택</button>
+  <select id="reassign-user">
+    <option value="">재배정 대상…</option>
+    {% for u in labelers %}<option value="{{ u.id }}">{{ u.username }}</option>{% endfor %}
+  </select>
+  <button class="btn-sm btn-secondary" onclick="reassignSelected()">선택 재배정</button>
+  <button class="btn-sm btn-warn" onclick="deleteSelected()">선택 삭제</button>
+</div>
 
 <div class="frame-grid">
   {% for f in frames %}
-  <a class="frame-card {{ f.batch_type }}" href="{{ url_for('annotate', frame_id=f.id) }}">
-    <div class="frame-thumb">
+  <div class="fcard" id="card-{{ f.id }}" data-fid="{{ f.id }}">
+    <input type="checkbox" class="chk" value="{{ f.id }}" onchange="onCheck(this)">
+    <a class="thumb" href="{{ url_for('annotate', frame_id=f.id) }}">
       <img src="{{ url_for('serve_frame', video_id=f.video_id, filename=f.filename) }}" loading="lazy">
-      <span class="frame-badge badge badge-labeler">{{ f.batch_type }}</span>
+      <span class="b-batch {{ f.batch_type }}">{{ f.batch_type }}</span>
+      <span class="b-done" style="color:{{ 'var(--green)' if f.done_assignments and f.done_assignments==f.total_assignments else 'var(--text-muted)' }}">
+        {{ f.done_assignments }}/{{ f.total_assignments }}</span>
+    </a>
+    <div class="meta">
+      <div class="idx">#{{ f.frame_index }} <span class="muted">· vid {{ f.video_id }}</span></div>
+      <div class="who" title="{{ f.assignees or '미배정' }}">{{ f.assignees or '미배정' }}</div>
     </div>
-    <div class="frame-meta">
-      <div class="frame-idx">#{{ f.frame_index }}</div>
-      <div class="frame-vid muted">{{ f.done_assignments }}/{{ f.total_assignments }} 완료</div>
+    <div class="row2">
+      <a class="btn-sm btn-secondary" href="{{ url_for('annotate', frame_id=f.id) }}">보기</a>
+      <button class="btn-sm btn-secondary del-btn" onclick="deleteOne({{ f.id }})">삭제</button>
     </div>
-  </a>
+  </div>
   {% else %}
   <div class="empty-state" style="grid-column:1/-1">프레임 없음</div>
   {% endfor %}
@@ -35,8 +88,63 @@
 {% if pages > 1 %}
 <div class="pagination">
   {% for p in range(1, pages+1) %}
-  <a href="?batch={{ batch_filter }}&page={{ p }}" class="page-btn {% if p==page %}active{% endif %}">{{ p }}</a>
+  <a href="?batch={{ batch_filter }}&video={{ video_filter }}&page={{ p }}"
+     class="page-btn {% if p==page %}active{% endif %}">{{ p }}</a>
   {% endfor %}
 </div>
 {% endif %}
+
+{% endblock %}
+{% block scripts %}
+<script>
+const PID = {{ proj.id }};
+const selected = new Set();
+
+function applyFilters() {
+  const v = document.getElementById('f-video').value;
+  const b = document.getElementById('f-batch').value;
+  location.href = `?video=${v}&batch=${b}&page=1`;
+}
+function onCheck(cb) {
+  const id = +cb.value;
+  cb.checked ? selected.add(id) : selected.delete(id);
+  document.getElementById('card-'+id)?.classList.toggle('selected', cb.checked);
+  document.getElementById('sel-count').textContent = selected.size;
+}
+function toggleAllPage() {
+  const boxes = [...document.querySelectorAll('.chk')];
+  const anyUnchecked = boxes.some(b => !b.checked);
+  boxes.forEach(b => { b.checked = anyUnchecked; onCheck(b); });
+}
+async function deleteOne(id) {
+  if (!confirm(`프레임 #${id} 을(를) 삭제할까요? (어노테이션도 함께 삭제)`)) return;
+  const r = await fetch(`/admin/frames/${id}/delete`, {method:'POST'});
+  if (r.ok) location.reload(); else alert('삭제 실패');
+}
+async function deleteSelected() {
+  if (!selected.size) { alert('선택된 프레임이 없습니다.'); return; }
+  if (!confirm(`${selected.size}장을 삭제할까요? (어노테이션도 함께 삭제, 되돌릴 수 없음)`)) return;
+  const r = await fetch('/admin/frames/delete', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({frame_ids: [...selected]})
+  });
+  const d = await r.json();
+  if (r.ok) { alert(`${d.deleted}장 삭제됨`); location.reload(); } else alert('삭제 실패');
+}
+async function reassignSelected() {
+  const uid = document.getElementById('reassign-user').value;
+  if (!uid) { alert('재배정 대상 라벨러를 선택하세요.'); return; }
+  if (!selected.size) { alert('선택된 프레임이 없습니다.'); return; }
+  if (!confirm(`${selected.size}장을 해당 라벨러에게 재배정할까요? (main 프레임 기준)`)) return;
+  let ok = 0;
+  for (const id of selected) {
+    const r = await fetch(`/admin/frames/${id}/reassign`, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({user_id: +uid})
+    });
+    if (r.ok) ok++;
+  }
+  alert(`${ok}장 재배정됨`); location.reload();
+}
+</script>
 {% endblock %}
