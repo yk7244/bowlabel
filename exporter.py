@@ -8,6 +8,17 @@ import shutil
 from pathlib import Path
 from database import get_db, SKELETON_CONNECTIONS, CLASS_NAME, coco_visibility
 
+
+def _split_schema(schema):
+    """Return (core_defs, optional_ids) preserving id order."""
+    core = [k for k in schema if not k.get("optional")]
+    optional_ids = {k["id"] for k in schema if k.get("optional")}
+    return core, optional_ids
+
+
+def _kp_lookup(kps_raw):
+    return {k.get("kp_id"): k for k in kps_raw}
+
 BASE_DIR = Path(__file__).parent
 FRAMES_DIR = BASE_DIR / "frames"
 EXPORTS_DIR = BASE_DIR / "exports"
@@ -39,7 +50,8 @@ def export_coco(project_id: int, main_only: bool = True) -> str:
     conn = get_db()
     proj = conn.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
     schema = json.loads(proj["keypoint_schema"])
-    kp_names = [k["name"] for k in schema]
+    core, _ = _split_schema(schema)
+    kp_names = [k["name"] for k in core]
     class_name = proj["class_name"] or CLASS_NAME
 
     rows = _query_rows(conn, project_id, main_only=main_only)
@@ -55,12 +67,13 @@ def export_coco(project_id: int, main_only: bool = True) -> str:
             "batch_type": row["batch_type"],
             "labeled_by": row["username"],
         })
-        kps_raw = json.loads(row["keypoints"])
+        lut = _kp_lookup(json.loads(row["keypoints"]))
         coco_kps = []
         num_vis = 0
-        for kp in kps_raw:
+        for kdef in core:
+            kp = lut.get(kdef["id"], {})
             v = coco_visibility(kp.get("visible", 0))
-            coco_kps += [kp.get("x", 0), kp.get("y", 0), v]
+            coco_kps += [kp.get("x") or 0, kp.get("y") or 0, v]
             if v > 0:
                 num_vis += 1
         bbox = json.loads(row["bbox"]) if row["bbox"] else {"x": 0, "y": 0, "w": 0, "h": 0}
@@ -97,7 +110,8 @@ def export_yolo_pose(project_id: int, main_only: bool = True) -> str:
     conn = get_db()
     proj = conn.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
     schema = json.loads(proj["keypoint_schema"])
-    n_kp = len(schema)
+    core, _ = _split_schema(schema)
+    n_kp = len(core)
     class_name = proj["class_name"] or CLASS_NAME
 
     rows = _query_rows(conn, project_id, main_only=main_only)
@@ -107,16 +121,17 @@ def export_yolo_pose(project_id: int, main_only: bool = True) -> str:
 
     for row in rows:
         W, H = row["width"] or 1920, row["height"] or 1080
-        kps_raw = json.loads(row["keypoints"])
+        lut = _kp_lookup(json.loads(row["keypoints"]))
         bbox = json.loads(row["bbox"]) if row["bbox"] else {"x": 0, "y": 0, "w": W, "h": H}
         cx = (bbox["x"] + bbox["w"] / 2) / W
         cy = (bbox["y"] + bbox["h"] / 2) / H
         bw = bbox["w"] / W
         bh = bbox["h"] / H
         kp_str = ""
-        for kp in kps_raw:
+        for kdef in core:
+            kp = lut.get(kdef["id"], {})
             v = coco_visibility(kp.get("visible", 0))
-            kp_str += f" {kp.get('x',0)/W:.6f} {kp.get('y',0)/H:.6f} {v}"
+            kp_str += f" {(kp.get('x') or 0)/W:.6f} {(kp.get('y') or 0)/H:.6f} {v}"
         base = f"{row['video_id']}_{row['filename'].replace('.jpg','')}"
         with open(out_dir / "labels" / f"{base}.txt", "w") as f:
             f.write(f"0 {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}{kp_str}\n")
@@ -149,25 +164,27 @@ def export_csv(project_id: int, main_only: bool = True) -> str:
     conn = get_db()
     proj = conn.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
     schema = json.loads(proj["keypoint_schema"])
-    kp_names = [k["name"] for k in schema]
     rows = _query_rows(conn, project_id, main_only=main_only)
 
     out_path = EXPORTS_DIR / f"project_{project_id}.csv"
     header = ["video_id", "frame_file", "frame_index", "batch_type", "labeled_by", "quality", "notes"]
-    for kn in kp_names:
-        header += [f"{kn}_x", f"{kn}_y", f"{kn}_v"]
+    for kdef in schema:
+        header += [f"{kdef['name']}_x", f"{kdef['name']}_y", f"{kdef['name']}_v"]
     header += ["bbox_x", "bbox_y", "bbox_w", "bbox_h"]
 
     with open(out_path, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(header)
         for row in rows:
-            kps = json.loads(row["keypoints"])
+            lut = _kp_lookup(json.loads(row["keypoints"]))
             bbox = json.loads(row["bbox"]) if row["bbox"] else {}
             line = [row["video_id"], row["filename"], row["frame_index"],
                     row["batch_type"], row["username"], row["quality"], row["notes"]]
-            for kp in kps:
-                line += [kp.get("x", 0), kp.get("y", 0), kp.get("visible", 0)]
+            for kdef in schema:
+                kp = lut.get(kdef["id"], {})
+                line += [kp.get("x") if kp.get("x") is not None else "",
+                         kp.get("y") if kp.get("y") is not None else "",
+                         kp.get("visible", 0)]
             line += [bbox.get("x", 0), bbox.get("y", 0), bbox.get("w", 0), bbox.get("h", 0)]
             w.writerow(line)
     conn.close()
@@ -179,7 +196,6 @@ def export_agreement(project_id: int) -> str:
     conn = get_db()
     proj = conn.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
     schema = json.loads(proj["keypoint_schema"])
-    kp_names = [k["name"] for k in schema]
 
     rows = conn.execute("""
         SELECT f.id AS frame_id, f.frame_index, f.filename, f.video_id,
@@ -194,8 +210,8 @@ def export_agreement(project_id: int) -> str:
 
     out_path = EXPORTS_DIR / f"project_{project_id}_pilot_agreement.csv"
     header = ["frame_id", "frame_index", "video_id", "filename", "labeler", "status", "quality"]
-    for kn in kp_names:
-        header += [f"{kn}_x", f"{kn}_y", f"{kn}_v"]
+    for kdef in schema:
+        header += [f"{kdef['name']}_x", f"{kdef['name']}_y", f"{kdef['name']}_v"]
 
     with open(out_path, "w", newline="") as f:
         w = csv.writer(f)
@@ -203,12 +219,12 @@ def export_agreement(project_id: int) -> str:
         for row in rows:
             line = [row["frame_id"], row["frame_index"], row["video_id"],
                     row["filename"], row["username"], row["status"], row["quality"]]
-            if row["keypoints"]:
-                kps = json.loads(row["keypoints"])
-                for kp in kps:
-                    line += [kp.get("x", 0), kp.get("y", 0), kp.get("visible", 0)]
-            else:
-                line += [0, 0, 0] * len(kp_names)
+            lut = _kp_lookup(json.loads(row["keypoints"])) if row["keypoints"] else {}
+            for kdef in schema:
+                kp = lut.get(kdef["id"], {})
+                line += [kp.get("x") if kp.get("x") is not None else "",
+                         kp.get("y") if kp.get("y") is not None else "",
+                         kp.get("visible", 0)]
             w.writerow(line)
     conn.close()
     return str(out_path)

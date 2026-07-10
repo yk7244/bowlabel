@@ -13,7 +13,7 @@ from werkzeug.utils import secure_filename
 from database import (get_db, init_db, reset_db, seed_admin,
                       DEFAULT_VIOLIN_SCHEMA, SKELETON_CONNECTIONS, GROUP_LABELS,
                       CLASS_NAME, QUALITY_OPTIONS, VIS_UNSET, VIS_VISIBLE,
-                      annotation_complete, coco_visibility)
+                      BOW_SAMPLES, annotation_complete, coco_visibility)
 from workflows import setup_project_workflow
 from extractor import allowed_video, get_video_info, extract_frames_async, UPLOADS_DIR, FRAMES_DIR
 from exporter import export_coco, export_yolo_pose, export_csv, export_agreement
@@ -565,11 +565,22 @@ def _neighbor_frame(conn, video_id, frame_index, uid, role, direction):
     return row["id"] if row else None
 
 
+def _parse_annotation(row):
+    if not row:
+        return None
+    d = dict(row)
+    d["keypoints"] = json.loads(d["keypoints"]) if d.get("keypoints") else []
+    d["bbox"] = json.loads(d["bbox"]) if d.get("bbox") else None
+    d["meta"] = json.loads(d["meta"]) if d.get("meta") else {}
+    return d
+
+
 @app.route("/annotate/<int:frame_id>")
 @login_required
 def annotate(frame_id):
     uid = session["user_id"]
     role = session.get("role")
+    is_admin = role == "admin"
     if not _can_access_frame(uid, role, frame_id):
         abort(403)
 
@@ -585,10 +596,37 @@ def annotate(frame_id):
     if not frame:
         abort(404)
 
-    existing = conn.execute(
-        "SELECT * FROM annotations WHERE frame_id=? AND labeled_by=? ORDER BY id DESC LIMIT 1",
-        (frame_id, uid)
-    ).fetchone()
+    # Admin views are read-only reviews of a chosen labeler's work.
+    annotators = conn.execute("""
+        SELECT a.labeled_by AS user_id, u.username,
+               fa.status AS status
+        FROM annotations a
+        JOIN users u ON u.id=a.labeled_by
+        LEFT JOIN frame_assignments fa
+               ON fa.frame_id=a.frame_id AND fa.user_id=a.labeled_by
+        WHERE a.frame_id=?
+        ORDER BY u.username
+    """, (frame_id,)).fetchall()
+    annotators = [dict(r) for r in annotators]
+
+    review_mode = is_admin
+    target_uid = uid
+    if is_admin:
+        requested = request.args.get("as_user", type=int)
+        if requested and any(a["user_id"] == requested for a in annotators):
+            target_uid = requested
+        elif annotators:
+            target_uid = annotators[0]["user_id"]
+        else:
+            target_uid = None
+
+    existing = None
+    if target_uid is not None:
+        existing = conn.execute(
+            "SELECT * FROM annotations WHERE frame_id=? AND labeled_by=? ORDER BY id DESC LIMIT 1",
+            (frame_id, target_uid)
+        ).fetchone()
+
     assignment = conn.execute(
         "SELECT * FROM frame_assignments WHERE frame_id=? AND user_id=?",
         (frame_id, uid)
@@ -598,12 +636,7 @@ def annotate(frame_id):
     next_id = _neighbor_frame(conn, frame["video_id"], frame["frame_index"], uid, role, "next")
     conn.close()
 
-    existing_parsed = None
-    if existing:
-        existing_parsed = dict(existing)
-        existing_parsed["keypoints"] = json.loads(existing["keypoints"])
-        if existing_parsed.get("bbox"):
-            existing_parsed["bbox"] = json.loads(existing_parsed["bbox"])
+    existing_parsed = _parse_annotation(existing)
 
     return render_template("annotate.html",
                            frame=frame,
@@ -614,6 +647,10 @@ def annotate(frame_id):
                            class_name=frame["class_name"],
                            quality_options=QUALITY_OPTIONS,
                            existing=existing_parsed,
+                           bow_samples=BOW_SAMPLES,
+                           review_mode=review_mode,
+                           annotators=annotators,
+                           target_uid=target_uid,
                            prev_id=prev_id, next_id=next_id)
 
 
@@ -624,11 +661,14 @@ def save_annotation():
     frame_id = d["frame_id"]
     kps = d["keypoints"]
     bbox = d.get("bbox")
+    meta = d.get("meta")
     notes = d.get("notes", "")
     quality = d.get("quality")
     uid = session["user_id"]
     role = session.get("role")
 
+    if role == "admin":
+        return jsonify({"error": "Admin view is read-only. Log in as a labeler to edit."}), 403
     if not _can_access_frame(uid, role, frame_id):
         return jsonify({"error": "Forbidden"}), 403
 
@@ -645,14 +685,12 @@ def save_annotation():
     finally:
         conn.close()
 
-    n_kp = len(schema)
-
-    # kp_id 순서 정렬 보장
     kps_sorted = sorted(kps, key=lambda k: k.get("kp_id", 0))
-    complete, missing = annotation_complete(kps_sorted, bbox, n_kp)
+    complete, missing = annotation_complete(kps_sorted, bbox, schema)
 
     payload_kps = json.dumps(kps_sorted)
     payload_bbox = json.dumps(bbox) if bbox else None
+    payload_meta = json.dumps(meta) if meta else None
     new_status = "labeled" if complete else "in_progress"
 
     last_err = None
@@ -661,15 +699,16 @@ def save_annotation():
         try:
             conn = get_db()
             conn.execute("""
-                INSERT INTO annotations (frame_id, project_id, labeled_by, keypoints, bbox, quality, notes)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO annotations (frame_id, project_id, labeled_by, keypoints, bbox, meta, quality, notes)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(frame_id, labeled_by) DO UPDATE SET
                     keypoints=excluded.keypoints,
                     bbox=excluded.bbox,
+                    meta=excluded.meta,
                     quality=excluded.quality,
                     notes=excluded.notes,
                     updated_at=datetime('now')
-            """, (frame_id, project_id, uid, payload_kps, payload_bbox, quality, notes))
+            """, (frame_id, project_id, uid, payload_kps, payload_bbox, payload_meta, quality, notes))
             conn.execute("""
                 UPDATE frame_assignments SET status=?, labeled_at=datetime('now')
                 WHERE frame_id=? AND user_id=?
@@ -693,7 +732,7 @@ def save_annotation():
         return jsonify({"error": str(last_err)}), 500
 
     miss_names = []
-    id_to_name = {s["id"]: s.get("label_short", s["name"]) for s in schema}
+    id_to_name = {s["id"]: s.get("label", s["name"]) for s in schema}
     for m in missing:
         if m == "__bbox__":
             miss_names.append("bbox")
@@ -720,7 +759,7 @@ def get_prev_annotation(frame_id):
         conn.close()
         return jsonify(None)
     prev = conn.execute("""
-        SELECT a.keypoints, a.bbox, a.notes, a.quality
+        SELECT a.keypoints, a.bbox, a.meta, a.notes, a.quality
         FROM frames f
         JOIN annotations a ON a.frame_id=f.id AND a.labeled_by=?
         WHERE f.video_id=? AND f.frame_index < ?
@@ -729,11 +768,7 @@ def get_prev_annotation(frame_id):
     conn.close()
     if not prev:
         return jsonify(None)
-    d = dict(prev)
-    d["keypoints"] = json.loads(d["keypoints"])
-    if d.get("bbox"):
-        d["bbox"] = json.loads(d["bbox"])
-    return jsonify(d)
+    return jsonify(_parse_annotation(prev))
 
 
 @app.route("/api/frames/<int:frame_id>/start", methods=["POST"])
@@ -764,11 +799,7 @@ def get_annotation(frame_id):
     conn.close()
     if not ann:
         return jsonify(None)
-    d = dict(ann)
-    d["keypoints"] = json.loads(d["keypoints"])
-    if d.get("bbox"):
-        d["bbox"] = json.loads(d["bbox"])
-    return jsonify(d)
+    return jsonify(_parse_annotation(ann))
 
 
 @app.route("/frames/<int:video_id>/<path:filename>")
@@ -788,10 +819,9 @@ if __name__ == "__main__":
     else:
         init_db()
     seed_admin("admin", "admin1234")
-    print("\n" + "=" * 50)
-    print("  BowLabel v3 — violin_bowing_scene · 9 keypoints")
-    print("  http://localhost:5050")
-    print("  admin / admin1234")
-    print("  DB 초기화: python3 app.py --reset")
-    print("=" * 50 + "\n")
+    print("\n" + "=" * 52)
+    print("  BowLabel v4 — violin_bowing_scene · 9 core keypoints")
+    print("  http://localhost:5050   (admin / admin1234)")
+    print("  Reset DB:  python3 app.py --reset")
+    print("=" * 52 + "\n")
     socketio.run(app, host="0.0.0.0", port=5050, debug=True, allow_unsafe_werkzeug=True)

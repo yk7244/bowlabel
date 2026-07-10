@@ -4,145 +4,230 @@
 <style>
 body { overflow: hidden; }
 .main-content { padding: 0; max-width: none; height: calc(100vh - 52px); display: flex; flex-direction: column; }
-.annotate-body { display: flex; flex: 1; overflow: hidden; }
-.annotate-panel { width: 320px; }
-.vis-badge { font-size: 11px; padding: 2px 8px; border-radius: 4px; display: inline-block; margin-top: 4px; font-family: monospace; }
-.vis-0 { background: #333; color: #888; }
-.vis-1 { background: #555520; color: #fbbf24; }
-.vis-2 { background: #1a4030; color: #34d399; }
-.vis-3 { background: #2a2a40; color: #8888aa; }
-.vis-btns { display: flex; gap: 4px; margin-top: 8px; }
-.vis-btns button { flex: 1; font-size: 11px; padding: 6px 4px; font-family: monospace; }
-.batch-pilot { color: #a78bfa; }
-.batch-main { color: var(--accent2); }
-.zoom-bar { display: flex; gap: 4px; align-items: center; margin-top: 6px; }
-.zoom-bar button { min-width: 32px; }
-.save-status.status-ok { color: var(--green); }
-.save-status.status-warn { color: var(--warn); }
-.save-status.status-error { color: var(--red); }
-.canvas-toolbar {
-  position: absolute; bottom: 12px; left: 12px; z-index: 5;
-  display: flex; gap: 6px; background: rgba(0,0,0,0.65);
-  padding: 6px 8px; border-radius: 8px; font-size: 11px; color: #aaa;
+
+/* top bar */
+.an-top {
+  display: flex; align-items: center; gap: 14px;
+  padding: 8px 16px; border-bottom: 1px solid var(--border);
+  background: var(--bg-card);
 }
+.an-top .sep { flex: 1; }
+.an-badge { font-family: 'JetBrains Mono', monospace; font-size: 11px; padding: 3px 9px;
+  border-radius: 6px; background: var(--bg-elevated); color: var(--text-muted); }
+.an-badge.pilot { background: #2a2350; color: #c4b5fd; }
+.an-badge.main  { background: #06303a; color: #67e8f9; }
+.an-badge.review{ background: #3a2320; color: #fca5a5; }
+.an-metric { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text-muted); }
+.an-metric b { color: var(--text); font-weight: 600; }
+.an-top .btn-sm { padding: 6px 11px; }
+.save-status { font-family: 'JetBrains Mono', monospace; font-size: 12px; min-width: 40px; }
+.save-status.ok { color: var(--green); } .save-status.warn { color: var(--warn); } .save-status.error { color: var(--red); }
+.progress-mini { width: 120px; height: 6px; background: var(--bg-elevated); border-radius: 3px; overflow: hidden; }
+.progress-mini > div { height: 100%; background: var(--green); transition: width .2s; }
+
+/* body split */
+.an-body { display: flex; flex: 1; overflow: hidden; }
+.an-canvas-wrap { flex: 1; position: relative; background: #05050c; overflow: hidden; }
+#canvas { display: block; }
+.canvas-tools {
+  position: absolute; left: 12px; bottom: 12px; z-index: 5;
+  display: flex; align-items: center; gap: 6px;
+  background: rgba(10,10,18,.82); backdrop-filter: blur(8px);
+  padding: 6px; border-radius: 10px; border: 1px solid var(--border);
+}
+.canvas-tools .btn-sm { padding: 6px 10px; }
+.canvas-hint {
+  position: absolute; left: 12px; top: 12px; z-index: 5;
+  background: rgba(10,10,18,.82); backdrop-filter: blur(8px);
+  padding: 8px 12px; border-radius: 10px; border: 1px solid var(--border);
+  font-size: 12px; color: var(--text); max-width: 60%;
+}
+.canvas-hint b { color: var(--accent2); }
+
+/* right panel */
+.an-panel { width: 340px; border-left: 1px solid var(--border); background: var(--bg-card);
+  display: flex; flex-direction: column; overflow: hidden; }
+.an-tabs { display: flex; padding: 10px 12px 0; gap: 6px; }
+.an-tab { flex: 1; padding: 8px 4px; text-align: center; font-size: 12px; font-weight: 600;
+  border: 1px solid var(--border); border-bottom: none; border-radius: 8px 8px 0 0;
+  background: var(--bg-base); color: var(--text-muted); cursor: pointer; }
+.an-tab.active { background: var(--bg-elevated); color: var(--text); }
+.an-scroll { flex: 1; overflow-y: auto; padding: 12px; }
+
+.step-card { background: var(--bg-elevated); border: 1px solid var(--border-light);
+  border-radius: 10px; padding: 12px; margin-bottom: 12px; }
+.step-card .title { font-size: 14px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+.step-card .dot { width: 10px; height: 10px; border-radius: 50%; }
+.step-card .sub { font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--text-muted); margin-top: 2px; }
+.step-card .desc { font-size: 12px; color: var(--text); margin-top: 8px; line-height: 1.45; }
+
+.vis-badge { display: inline-block; font-family: 'JetBrains Mono', monospace; font-size: 11px;
+  padding: 2px 8px; border-radius: 5px; margin-top: 10px; }
+.vis-0 { background: #2a2a3d; color: #8a8aa0; }
+.vis-1 { background: #4a3b12; color: #fcd34d; }
+.vis-2 { background: #10402f; color: #4ade80; }
+.vis-3 { background: #33222e; color: #f0a; }
+.vis-btns { display: flex; gap: 6px; margin-top: 10px; }
+.vis-btns button { flex: 1; padding: 7px 4px; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+
+.kp-list { display: flex; flex-direction: column; gap: 4px; }
+.kp-group-label { font-size: 10px; text-transform: uppercase; letter-spacing: .08em;
+  color: var(--text-muted); margin: 12px 0 4px; }
+.kp-item { display: flex; align-items: center; gap: 9px; padding: 8px 10px; border-radius: 8px;
+  background: var(--bg-base); border: 1px solid transparent; cursor: pointer; }
+.kp-item:hover { background: var(--bg-hover); }
+.kp-item.sel { border-color: var(--accent2); background: var(--bg-elevated); }
+.kp-item.auto { opacity: .6; cursor: default; }
+.kp-dot { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
+.kp-name { flex: 1; font-size: 12px; }
+.kp-chip { font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--text-muted); }
+
+.bow-box { background: var(--bg-base); border: 1px dashed var(--border-light); border-radius: 10px;
+  padding: 12px; margin-bottom: 12px; }
+.bow-box .st { font-size: 12px; color: var(--text); }
+.bow-box .cnt { font-family: 'JetBrains Mono', monospace; color: var(--accent); font-weight: 600; }
+.bow-actions { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+
+.an-foot { border-top: 1px solid var(--border); padding: 10px 12px; background: var(--bg-card); }
+.an-foot .row { display: flex; gap: 8px; margin-bottom: 8px; }
+.an-foot select, .an-foot textarea { width: 100%; background: var(--bg-base); color: var(--text);
+  border: 1px solid var(--border); border-radius: 8px; padding: 7px 9px; font-size: 12px; font-family: inherit; }
+.shortcut { font-size: 10px; color: var(--text-muted); margin-top: 6px; line-height: 1.5;
+  font-family: 'JetBrains Mono', monospace; }
+.readonly-note { background: #33222e; color: #fca5a5; border-radius: 8px; padding: 10px;
+  font-size: 12px; text-align: center; }
+select.labeler-sel { background: var(--bg-elevated); color: var(--text); border: 1px solid var(--border);
+  border-radius: 7px; padding: 5px 8px; font-size: 12px; }
 </style>
 {% endblock %}
 {% block content %}
 
-<div class="annotate-topbar">
-  <div class="topbar-info">
-    <span class="project-badge">{{ class_name }}</span>
-    <span class="badge {{ 'batch-pilot' if frame.batch_type=='pilot' else 'batch-main' }}">
-      {{ frame.batch_type|upper }}
-    </span>
-    <span class="muted">#{{ frame.frame_index }}</span>
-    <span id="save-hint" class="muted" style="font-size:11px"></span>
-  </div>
-  <div class="topbar-progress">
-    <span id="kp-progress-label" class="muted" style="font-size:11px">0/9</span>
-    <span id="bbox-status" class="muted" style="font-size:11px;margin-left:8px">bbox needed</span>
-    <div class="progress-bar progress-bar-sm" style="width:100px;margin-left:6px">
-      <div class="progress-fill" id="kp-progress-bar"></div>
-    </div>
-  </div>
-  <div class="topbar-nav">
-    {% if prev_id %}<a href="{{ url_for('annotate', frame_id=prev_id) }}" class="btn-sm btn-secondary">◀</a>
-    {% else %}<button class="btn-sm btn-secondary" disabled>◀</button>{% endif %}
-    <button class="btn-sm btn-secondary" onclick="goNext()" title="Save & next">▶</button>
-    <button class="btn-sm btn-secondary" onclick="copyFromPrev()">Copy</button>
-    <button class="btn-sm btn-primary" onclick="saveAnnotation(false)">Save</button>
-  </div>
+<div class="an-top">
+  <span class="an-badge">{{ class_name }}</span>
+  <span class="an-badge {{ frame.batch_type }}">{{ frame.batch_type|upper }}</span>
+  <span class="an-metric">#{{ frame.frame_index }}</span>
+  {% if review_mode %}
+    <span class="an-badge review">READ-ONLY REVIEW</span>
+    {% if annotators %}
+    <select class="labeler-sel" onchange="location.href='?as_user='+this.value">
+      {% for a in annotators %}
+      <option value="{{ a.user_id }}" {% if a.user_id==target_uid %}selected{% endif %}>
+        {{ a.username }} · {{ a.status or 'in_progress' }}
+      </option>
+      {% endfor %}
+    </select>
+    {% else %}
+    <span class="an-metric">no annotations yet</span>
+    {% endif %}
+  {% endif %}
+
+  <span class="sep"></span>
+
+  {% if not review_mode %}
+  <span class="an-metric"><b id="m-core">0</b>/{{ (schema|selectattr('optional','undefined')|list|length) }} core</span>
+  <div class="progress-mini"><div id="m-bar"></div></div>
+  <span class="an-metric" id="m-bbox">bbox needed</span>
+  <span id="save-status" class="save-status"></span>
+  {% endif %}
+
+  {% if prev_id %}<a href="{{ url_for('annotate', frame_id=prev_id) }}{% if review_mode and target_uid %}?as_user={{ target_uid }}{% endif %}" class="btn-sm btn-secondary" title="Prev (←)">◀</a>
+  {% else %}<button class="btn-sm btn-secondary" disabled>◀</button>{% endif %}
+  {% if not review_mode %}
+  <button class="btn-sm btn-secondary" onclick="copyFromPrev()" title="Copy previous (C)">Copy</button>
+  <button class="btn-sm btn-secondary" onclick="saveAnnotation(false)" title="Save (S)">Save</button>
+  <button class="btn-sm btn-primary" onclick="goNext()" title="Save & next (Enter)">Save ▶</button>
+  {% else %}
+  {% if next_id %}<a href="{{ url_for('annotate', frame_id=next_id) }}?as_user={{ target_uid }}" class="btn-sm btn-primary">▶</a>{% endif %}
+  {% endif %}
 </div>
 
-<div class="annotate-body">
-  <div class="annotate-canvas-wrap" id="canvas-wrap" style="position:relative">
+<div class="an-body">
+  <div class="an-canvas-wrap" id="canvas-wrap">
     <canvas id="canvas"></canvas>
-    <div class="canvas-toolbar">
-      <button class="btn-sm btn-secondary" onclick="zoomButton(-1)">−</button>
-      <button class="btn-sm btn-secondary" onclick="zoomButton(1)">+</button>
+    <div class="canvas-hint" id="canvas-hint"></div>
+    <div class="canvas-tools">
+      <button class="btn-sm btn-secondary" onclick="zoomBtn(-1)">−</button>
+      <button class="btn-sm btn-secondary" onclick="zoomBtn(1)">+</button>
       <button class="btn-sm btn-secondary" onclick="fitToCanvas(); redraw();">Fit</button>
-      <span>Space/Alt+drag pan · Shift+wheel h-scroll</span>
     </div>
   </div>
 
-  <div class="annotate-panel">
-
-    <div class="kp-current-card">
-      <div class="kp-current-name" id="kp-current-name">—</div>
-      <div class="kp-current-sub muted" id="kp-current-sub" style="font-size:10px;font-family:monospace"></div>
-      <div class="kp-current-desc" id="kp-current-desc" style="font-size:12px;margin-top:6px"></div>
-      <span class="vis-badge vis-0" id="kp-current-vis">unset</span>
-      <div class="vis-btns">
-        <button class="btn-sm btn-secondary" onclick="setVisState(2)" title="V">visible</button>
-        <button class="btn-sm btn-secondary" onclick="setVisState(1)" title="O">occluded</button>
-        <button class="btn-sm btn-secondary" onclick="setVisState(3)" title="U">outside</button>
-      </div>
+  <div class="an-panel">
+    {% if not review_mode %}
+    <div class="an-tabs">
+      <div class="an-tab active" data-tool="point" onclick="setTool('point')">Instrument</div>
+      <div class="an-tab" data-tool="bow" onclick="setTool('bow')">Bow</div>
+      <div class="an-tab" data-tool="bbox" onclick="setTool('bbox')">Box</div>
     </div>
+    {% endif %}
 
-    <div class="panel-section panel-compact">
-      <div class="mode-btns">
-        <button class="mode-btn active" id="mode-kp" onclick="setMode('keypoint')">keypoints</button>
-        <button class="mode-btn" id="mode-bbox" onclick="setMode('bbox')">bbox</button>
+    <div class="an-scroll">
+      {% if review_mode %}
+      <div class="readonly-note">
+        Admin review. Use the selector above to switch labelers.<br>Editing is disabled.
       </div>
-      <div class="hint-text" id="mode-hint">Click=visible · Right-click=occluded · U=outside</div>
-    </div>
+      {% endif %}
 
-    <div class="panel-section panel-compact">
-      <div class="group-filter-row">
-        <button class="btn-sm btn-secondary group-filter-btn active" data-group="all" onclick="setGroupFilter('all')">all</button>
-        {% set ng = namespace(seen=[]) %}
-        {% for kp in schema %}
-          {% if kp.group not in ng.seen %}
-            {% set ng.seen = ng.seen + [kp.group] %}
-            <button class="btn-sm btn-secondary group-filter-btn" data-group="{{ kp.group }}"
-                    onclick="setGroupFilter('{{ kp.group }}')">{{ kp.group }}</button>
-          {% endif %}
-        {% endfor %}
-      </div>
-    </div>
-
-    <div class="kp-list-wrap">
-      <div class="kp-list-header"><span>9 keypoints</span></div>
-      <div class="kp-list">
-        {% set ns = namespace(g='') %}
-        {% for kp in schema %}
-          {% if kp.group != ns.g %}
-            {% set ns.g = kp.group %}
-            <div class="kp-group-header">{{ kp.group }}</div>
-          {% endif %}
-          <div class="kp-item" id="kp-item-{{ kp.id }}" onclick="selectKP({{ loop.index0 }})">
-            <span class="kp-idx muted">{{ loop.index }}</span>
-            <span class="kp-dot" style="background:{{ kp.color }}"></span>
-            <div class="kp-item-text">
-              <span class="kp-label">{{ kp.name }}</span>
-            </div>
-            <span class="kp-status" id="kp-status-{{ kp.id }}">unset</span>
+      <!-- point tool panel -->
+      <div id="pane-point" {% if review_mode %}style="margin-top:12px"{% endif %}>
+        <div class="step-card" id="step-card">
+          <div class="title"><span class="dot" id="sc-dot"></span><span id="sc-name">—</span></div>
+          <div class="sub" id="sc-sub"></div>
+          <div class="desc" id="sc-desc"></div>
+          <span class="vis-badge vis-0" id="sc-vis">unset</span>
+          {% if not review_mode %}
+          <div class="vis-btns">
+            <button class="btn-sm btn-secondary" onclick="setVis(2)" title="V">visible</button>
+            <button class="btn-sm btn-secondary" onclick="setVis(1)" title="O">occluded</button>
+            <button class="btn-sm btn-secondary" onclick="setVis(3)" title="X">outside</button>
           </div>
-        {% endfor %}
+          {% endif %}
+        </div>
+
+        <div class="kp-list" id="kp-list"></div>
+      </div>
+
+      <!-- bow tool panel -->
+      <div id="pane-bow" style="display:none">
+        <div class="bow-box">
+          <div class="st">Trace the <b>visible bow stick</b> centerline from the <b>frog side → tip side</b>.
+          Click several points along the stick, then press <b>Enter</b>.</div>
+          <div class="st" style="margin-top:8px">points placed: <span class="cnt" id="bow-count">0</span>
+            · resamples to {{ bow_samples }} keypoints</div>
+          <div class="bow-actions">
+            <button class="btn-sm btn-primary" onclick="finishBow()">Finish (Enter)</button>
+            <button class="btn-sm btn-secondary" onclick="undoBowVertex()">Undo pt (⌫)</button>
+            <button class="btn-sm btn-secondary" onclick="redrawBow()">Redraw</button>
+            <button class="btn-sm btn-secondary" onclick="clearBow()">Not visible</button>
+          </div>
+        </div>
+        <div class="desc" style="font-size:12px;color:var(--text-muted);line-height:1.5">
+          If the tip or frog is hidden/off-frame, do <b>not</b> guess — just start/stop at the
+          furthest <b>visible</b> stick point. The 25/50/75 marks are computed along the visible
+          part only. If the visible stick is too short or blurred, click <b>Not visible</b>.
+        </div>
       </div>
     </div>
 
-    <div class="panel-bottom">
-      <div class="panel-section panel-compact">
-        <label class="muted" style="font-size:11px">quality</label>
-        <select id="quality" style="width:100%;margin-top:4px;font-size:12px">
-          <option value="">—</option>
+    {% if not review_mode %}
+    <div class="an-foot">
+      <div class="row">
+        <select id="quality">
+          <option value="">quality —</option>
           {% for val, lbl in quality_options %}
-          <option value="{{ val }}">{{ val }}</option>
+          <option value="{{ val }}" title="{{ lbl }}">{{ val }}</option>
           {% endfor %}
         </select>
       </div>
-      <div class="panel-section panel-compact">
-        <textarea id="notes" rows="2" placeholder="notes" style="width:100%;resize:none;font-size:12px"></textarea>
+      <div class="row">
+        <textarea id="notes" rows="2" placeholder="notes (optional)"></textarea>
       </div>
-      <div class="panel-section panel-compact">
-        <button class="btn-primary full-width" onclick="saveAnnotation(true)">Save + Next (Enter)</button>
-        <div id="save-status" class="save-status"></div>
-      </div>
-      <div class="shortcut-help">
-        V/O/U · B bbox · C copy · R reset kp · Space/Alt pan · +/− zoom
+      <div class="shortcut">
+        click=place · drag=move · right-click=occluded · V/O/X visibility<br>
+        1–9 select · B bow · N box · Space/Alt+drag pan · +/− zoom · Enter save+next
       </div>
     </div>
+    {% endif %}
   </div>
 </div>
 
@@ -153,15 +238,14 @@ const IMG_W    = {{ frame.width or 1920 }};
 const IMG_H    = {{ frame.height or 1080 }};
 const SCHEMA   = {{ schema | tojson }};
 const CONNECTIONS = {{ connections | tojson }};
+const GROUP_LABELS = {{ group_labels | tojson }};
 const EXISTING = {% if existing %}{{ existing | tojson }}{% else %}null{% endif %};
-const EXISTING_KEYPOINTS = {% if existing and existing.keypoints %}{{ existing.keypoints | tojson }}{% else %}null{% endif %};
-const EXISTING_BBOX   = {% if existing and existing.bbox %}{{ existing.bbox | tojson }}{% else %}null{% endif %};
-const EXISTING_NOTES  = {{ (existing.notes if existing else "") | tojson }};
-const EXISTING_QUALITY = {{ (existing.quality if existing else "") | tojson }};
+const BOW_SAMPLES = {{ bow_samples }};
+const REVIEW = {{ 'true' if review_mode else 'false' }};
 const NEXT_ID = {{ next_id or 'null' }};
 const PREV_ID = {{ prev_id or 'null' }};
 </script>
 {% endblock %}
 {% block scripts %}
-<script src="{{ url_for('static', filename='js/annotate.js') }}?v=33"></script>
+<script src="{{ url_for('static', filename='js/annotate.js') }}?v=40"></script>
 {% endblock %}

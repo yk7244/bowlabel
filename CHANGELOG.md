@@ -4,6 +4,55 @@
 
 ---
 
+## 2026-07-10 — v4 스키마 전면 개편 + 관리자 리뷰 + UI 재작성
+
+**커밋:** `v4: 촬영 기반 9키포인트 스키마, bow polyline, 관리자 리뷰, UI 재작성`
+
+라벨러/촬영 현실에 맞춰 GPT와 확정한 최종 스키마로 전환하고, 시스템 버그를 함께 고침.
+**v3와 키포인트가 완전히 달라 DB 비호환 → `python3 app.py --reset` 필요.**
+
+### 배경 (문제)
+1. 관리자로 로그인해도 **다른 라벨러가 작업한 오버레이가 갤러리에서 안 보임**
+2. 기존 키포인트(nut·bridge·활 tip/frog)가 실제 영상에서 자주 가려짐 → 반복성 낮음
+3. 활이 곡선이라 tip–frog 직선으로 각도 계산 시 부정확
+4. 점 찍기(특히 occluded/outside)가 어색, UI/디자인 불만
+5. visibility 용어 한글 → 영문 요청
+
+### 무엇을 · 어떻게
+
+#### 스키마 (`database.py`) — SCHEMA_VERSION 3 → 4
+- **Core 9점**: `fingerboard_body_g/e_corner`, `tailpiece_upper/lower_center`,
+  `bow_visible_stick_start/25/50/75/end`
+- **Optional 3점**: `bridge_g/e_foot_center`, `bow_string_contact_center`
+  (보일 때만, 완료 조건 아님, YOLO kpt_shape에서 제외)
+- 각 def에 `kind`(point/bow), `auto`(25/50/75), `optional`, 영문 `label`, `desc` 추가
+- `annotation_complete(kps, bbox, schema)` — core만 필수 판정으로 시그니처 변경
+- `annotations`에 `meta` 컬럼 추가(활 polyline 원본 저장) + 구DB 자동 마이그레이션
+
+#### 관리자 리뷰 버그 (`app.py`)
+- **원인**: `annotate()`가 `labeled_by = 본인(admin) uid`로만 조회 → 라벨러(다른 uid) 결과 안 보임
+- **수정**: admin은 **읽기 전용 리뷰 모드**. 프레임의 모든 어노테이터 목록을 조회해
+  드롭다운으로 선택(`?as_user=`), 기본은 첫 라벨러 오버레이 표시
+- admin의 `POST /api/annotations`는 403으로 차단(라벨러 작업 보호)
+- `meta` 저장/복원, `_parse_annotation()` 공통화
+
+#### 라벨링 UI 재작성 (`annotate.js` v4 + `annotate.html`)
+- 3개 도구 탭: **Instrument · Bow · Box**, 깔끔한 다크 UI 재디자인
+- **Bow polyline**: 보이는 활대 중심선을 클릭 → arc-length 5점 자동 리샘플
+  (tip/frog 가림·프레임밖 시 보이는 끝까지만; Redraw/Undo/Not-visible)
+- visibility **visible/occluded/outside** 영문 통일, 우클릭 occluded, 드래그 이동
+- outside/occluded 좌표 클러스터 방지, save mutex, 부드러운 줌, Space/Alt 팬 유지
+- 상단 core 진행도/ bbox 상태/ 저장 상태 표시
+
+#### Export (`exporter.py`)
+- COCO/YOLO는 **core 9점만** 사용 (`kpt_shape: [9,3]`), optional 제외
+- CSV/agreement는 id 순 lookup으로 컬럼 정렬 보장, null 좌표는 빈 칸
+
+#### 문서
+- `README.md` 전면 개정: v4 스키마, **서버 동작 원리·데이터 저장 위치**, 리뷰 모드, 단축키
+
+---
+
 ## 2026-07-02 — v3.2 저장 버그·bbox 핸들·줌 조정
 
 **커밋:** `저장 race condition 수정, bbox 꼭지점 조정, 줌 속도 상향`

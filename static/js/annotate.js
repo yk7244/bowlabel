@@ -1,684 +1,550 @@
 /**
- * annotate.js v3.2 — save mutex, bbox handles, zoom tune
- * visibility: 0=unset  1=occluded  2=visible  3=outside
- * Space+drag / middle-click = pan · slower wheel zoom
+ * annotate.js v4 — BowLabel labeling canvas
+ *
+ *  Tools:  Instrument/optional points · Bow (visible-stick polyline) · Box
+ *  Visibility:  0 unset · 1 occluded · 2 visible · 3 outside
+ *  Bow:  trace the visible stick centerline (frog→tip); auto-resampled to 5 pts.
+ *  Admin opens frames in read-only REVIEW mode (see other labelers' overlays).
  */
 
-const VIS_UNSET    = 0;
-const VIS_OCCLUDED = 1;
-const VIS_VISIBLE  = 2;
-const VIS_OUTSIDE  = 3;
+const VIS_UNSET = 0, VIS_OCCLUDED = 1, VIS_VISIBLE = 2, VIS_OUTSIDE = 3;
+const VIS_NAME = {0: 'unset', 1: 'occluded', 2: 'visible', 3: 'outside'};
 
-const POINT_RADIUS   = 8;
-const POINT_SELECTED = 12;
-const HIT_RADIUS     = 16;
-const MIN_SCALE      = 0.15;
-const MAX_SCALE      = 18;
-const ZOOM_IN        = 1.06;
-const ZOOM_OUT       = 0.94;
-const WHEEL_ZOOM_SENS = 0.0026;
-const BBOX_HANDLE_R  = 7;
-const BBOX_HANDLE_HIT = 14;
-const BBOX_OPPOSITE  = {tl: 'br', tr: 'bl', bl: 'tr', br: 'tl'};
-const BBOX_CURSORS   = {tl: 'nwse-resize', br: 'nwse-resize', tr: 'nesw-resize', bl: 'nesw-resize'};
+const R_POINT = 7, R_SEL = 11, HIT = 15;
+const MIN_SCALE = 0.1, MAX_SCALE = 24;
+const WHEEL_SENS = 0.0022, ZOOM_STEP = 1.18;
+const HANDLE_HIT = 14;
+const OPP = {tl: 'br', tr: 'bl', bl: 'tr', br: 'tl'};
+const CURS = {tl: 'nwse-resize', br: 'nwse-resize', tr: 'nesw-resize', bl: 'nesw-resize'};
+
+// ── schema-derived ───────────────────────────────────────────────────────────
+const DEF = {};                       // id -> def
+SCHEMA.forEach(d => DEF[d.id] = d);
+const POINT_DEFS = SCHEMA.filter(d => d.kind === 'point');       // instrument + optional
+const BOW_DEFS   = SCHEMA.filter(d => d.kind === 'bow');         // 5 stick points
+const BOW_IDS    = BOW_DEFS.map(d => d.id);
+const CORE_IDS   = SCHEMA.filter(d => !d.optional).map(d => d.id);
+const CORE_N     = CORE_IDS.length;
+
+// ── state ────────────────────────────────────────────────────────────────────
+const pts = {};                       // id -> {x, y, visible}
+SCHEMA.forEach(d => pts[d.id] = {x: null, y: null, visible: VIS_UNSET});
+
+let tool = 'point';                   // 'point' | 'bow' | 'bbox'
+let selectedId = POINT_DEFS[0]?.id ?? 0;
+let bbox = null;
+let bowDraft = [];                    // [[x,y],...] image coords being traced
+let bowFinished = false;
+
+let scale = 1, offX = 0, offY = 0;
+let mouseImg = {x: -1, y: -1};
+let dragging = null;                  // {type,...}
+let panning = null;
+let spaceHeld = false;
+let dirty = false;
 
 const canvas = document.getElementById('canvas');
-const ctx    = canvas.getContext('2d');
-const img    = new Image();
+const ctx = canvas.getContext('2d');
+const img = new Image();
 
-let keypoints = SCHEMA.map(kp => ({
-  kp_id: kp.id, name: kp.name, color: kp.color, group: kp.group,
-  label_short: kp.label_short || kp.name,
-  desc: kp.desc || '',
-  x: null, y: null, visible: VIS_UNSET,
-}));
-
-let bbox = null, selectedKP = 0, mode = 'keypoint';
-let groupFilter = null;
-let isDragging = false, dragTarget = null, bboxStart = null;
-let isPanning = false, panStart = null;
-let spaceHeld = false;
-let scale = 1, offsetX = 0, offsetY = 0;
-let mouseImgPos = {x: 0, y: 0};
-let dirty = false;
-let saveInFlight = null;
-
-fetch(`/api/frames/${FRAME_ID}/start`, {method: 'POST'}).catch(() => {});
+// ── init ─────────────────────────────────────────────────────────────────────
+if (!REVIEW) fetch(`/api/frames/${FRAME_ID}/start`, {method: 'POST'}).catch(() => {});
 
 img.onload = () => {
   fitToCanvas();
   loadExisting();
-  selectedKP = keypoints.findIndex(k => !isAddressed(k));
-  if (selectedKP < 0) selectedKP = 0;
-  redraw(); updatePanel(); updateProgress(); updateCurrentCard();
-  setStatus('ready', '');
+  buildList();
+  selectFirstUnaddressed();
+  setTool('point', true);
+  redraw(); refreshPanel(); updateMetrics();
 };
-img.onerror = () => setStatus('error', 'Image load failed');
+img.onerror = () => setStatus('error', 'image load failed');
 img.src = IMG_URL;
 
-function hasCoords(kp) {
-  return kp.x != null && kp.y != null && Number.isFinite(kp.x) && Number.isFinite(kp.y);
+function hasXY(p) { return p && p.x != null && p.y != null && isFinite(p.x) && isFinite(p.y); }
+function drawable(id) {
+  const p = pts[id];
+  return (p.visible === VIS_VISIBLE || p.visible === VIS_OCCLUDED) && hasXY(p);
 }
-
-function isDrawable(kp) {
-  return kp.visible === VIS_VISIBLE && hasCoords(kp)
-    || (kp.visible === VIS_OCCLUDED && hasCoords(kp));
-}
-
-function normalizeLoadedKp(kp, e) {
-  kp.visible = e.visible ?? VIS_UNSET;
-  if (kp.visible === VIS_OUTSIDE) {
-    kp.x = null; kp.y = null;
-    return;
-  }
-  if (kp.visible === VIS_OCCLUDED && (e.x == null || e.y == null || (e.x === 0 && e.y === 0))) {
-    kp.x = null; kp.y = null;
-    return;
-  }
-  if (kp.visible === VIS_VISIBLE || kp.visible === VIS_OCCLUDED) {
-    if (e.x != null && e.y != null && !(e.x === 0 && e.y === 0 && kp.visible === VIS_OCCLUDED)) {
-      kp.x = e.x; kp.y = e.y;
-    } else if (kp.visible === VIS_VISIBLE) {
-      kp.x = e.x; kp.y = e.y;
-    }
-  }
-}
+function addressed(id) { return pts[id].visible !== VIS_UNSET; }
 
 function loadExisting() {
-  let raw = null;
-  if (EXISTING?.keypoints) raw = EXISTING.keypoints;
-  else if (Array.isArray(EXISTING_KEYPOINTS)) raw = EXISTING_KEYPOINTS;
-
-  if (raw) {
-    const arr = typeof raw === 'string' ? JSON.parse(raw) : raw;
-    arr.forEach(e => {
-      const kp = keypoints.find(k => k.kp_id === e.kp_id);
-      if (kp) normalizeLoadedKp(kp, e);
-    });
-  }
-  if (EXISTING_BBOX && EXISTING_BBOX.w > 0) bbox = {...EXISTING_BBOX};
-  if (EXISTING_NOTES) document.getElementById('notes').value = EXISTING_NOTES;
-  if (EXISTING_QUALITY) document.getElementById('quality').value = EXISTING_QUALITY;
-}
-
-function isAddressed(kp) { return kp.visible !== VIS_UNSET; }
-
-function activeIndices() {
-  return keypoints.map((_, i) => i).filter(i =>
-    !groupFilter || keypoints[i].group === groupFilter);
-}
-
-function imgToCanvas(x, y) { return [x * scale + offsetX, y * scale + offsetY]; }
-function canvasToImg(cx, cy) { return [(cx - offsetX) / scale, (cy - offsetY) / scale]; }
-function clampImg(x, y) {
-  return [Math.max(0, Math.min(IMG_W, x)), Math.max(0, Math.min(IMG_H, y))];
-}
-
-function bboxCorners(b) {
-  return {
-    tl: {x: b.x, y: b.y},
-    tr: {x: b.x + b.w, y: b.y},
-    bl: {x: b.x, y: b.y + b.h},
-    br: {x: b.x + b.w, y: b.y + b.h},
-  };
-}
-
-function bboxFromAnchor(anchor, nx, ny) {
-  const x1 = Math.min(anchor.x, nx);
-  const y1 = Math.min(anchor.y, ny);
-  const x2 = Math.max(anchor.x, nx);
-  const y2 = Math.max(anchor.y, ny);
-  return {x: x1, y: y1, w: x2 - x1, h: y2 - y1};
-}
-
-function pointInBbox(ix, iy) {
-  if (!bbox?.w || !bbox?.h) return false;
-  return ix >= bbox.x && ix <= bbox.x + bbox.w && iy >= bbox.y && iy <= bbox.y + bbox.h;
-}
-
-function getHitBboxHandle(cx, cy) {
-  if (!bbox?.w || !bbox?.h || mode !== 'bbox') return null;
-  for (const [id, pt] of Object.entries(bboxCorners(bbox))) {
-    const [hx, hy] = imgToCanvas(pt.x, pt.y);
-    if (Math.hypot(cx - hx, cy - hy) < BBOX_HANDLE_HIT) return id;
-  }
-  return null;
-}
-
-function drawBboxHandles() {
-  if (!bbox?.w || !bbox?.h || mode !== 'bbox') return;
-  Object.entries(bboxCorners(bbox)).forEach(([id, pt]) => {
-    const [hx, hy] = imgToCanvas(pt.x, pt.y);
-    ctx.fillStyle = '#00d4ff';
-    ctx.strokeStyle = '#fff';
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.arc(hx, hy, BBOX_HANDLE_R, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.stroke();
+  if (!EXISTING) return;
+  (EXISTING.keypoints || []).forEach(e => {
+    const p = pts[e.kp_id];
+    if (!p) return;
+    p.visible = e.visible ?? VIS_UNSET;
+    if (p.visible === VIS_OUTSIDE) { p.x = null; p.y = null; }
+    else if (e.x != null && e.y != null) { p.x = e.x; p.y = e.y; }
   });
+  if (EXISTING.bbox && EXISTING.bbox.w > 0) bbox = {...EXISTING.bbox};
+  const meta = EXISTING.meta || {};
+  if (meta.bow_polyline && meta.bow_polyline.length >= 2) {
+    bowDraft = meta.bow_polyline.map(p => [p[0], p[1]]);
+  } else if (BOW_IDS.every(id => hasXY(pts[id]))) {
+    bowDraft = BOW_IDS.map(id => [pts[id].x, pts[id].y]);
+  }
+  bowFinished = BOW_IDS.some(id => hasXY(pts[id]));
+  const q = document.getElementById('quality'); if (q && EXISTING.quality) q.value = EXISTING.quality;
+  const nt = document.getElementById('notes'); if (nt && EXISTING.notes) nt.value = EXISTING.notes;
 }
+
+// ── coordinate transforms ─────────────────────────────────────────────────────
+function i2c(x, y) { return [x * scale + offX, y * scale + offY]; }
+function c2i(cx, cy) { return [(cx - offX) / scale, (cy - offY) / scale]; }
+function clampImg(x, y) { return [Math.max(0, Math.min(IMG_W, x)), Math.max(0, Math.min(IMG_H, y))]; }
+function cpos(e) { const r = canvas.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; }
 
 function fitToCanvas() {
   const wrap = document.getElementById('canvas-wrap');
   canvas.width = wrap.clientWidth;
   canvas.height = wrap.clientHeight;
-  const s = Math.min(canvas.width / IMG_W, canvas.height / IMG_H) * 0.94;
+  const s = Math.min(canvas.width / IMG_W, canvas.height / IMG_H) * 0.95;
   scale = s;
-  offsetX = (canvas.width - IMG_W * s) / 2;
-  offsetY = (canvas.height - IMG_H * s) / 2;
+  offX = (canvas.width - IMG_W * s) / 2;
+  offY = (canvas.height - IMG_H * s) / 2;
+}
+function zoomAt(cx, cy, f) {
+  const ns = Math.max(MIN_SCALE, Math.min(MAX_SCALE, scale * f));
+  offX = cx - (cx - offX) * (ns / scale);
+  offY = cy - (cy - offY) * (ns / scale);
+  scale = ns; redraw();
+}
+function zoomBtn(dir) { zoomAt(canvas.width / 2, canvas.height / 2, dir > 0 ? ZOOM_STEP : 1 / ZOOM_STEP); }
+
+// ── bbox helpers ──────────────────────────────────────────────────────────────
+function corners(b) {
+  return { tl: {x: b.x, y: b.y}, tr: {x: b.x + b.w, y: b.y},
+           bl: {x: b.x, y: b.y + b.h}, br: {x: b.x + b.w, y: b.y + b.h} };
+}
+function bboxFrom(ax, ay, nx, ny) {
+  return { x: Math.min(ax, nx), y: Math.min(ay, ny), w: Math.abs(nx - ax), h: Math.abs(ny - ay) };
+}
+function inBbox(x, y) { return bbox && bbox.w > 0 && x >= bbox.x && x <= bbox.x + bbox.w && y >= bbox.y && y <= bbox.y + bbox.h; }
+function hitHandle(cx, cy) {
+  if (!bbox || bbox.w <= 0 || tool !== 'bbox') return null;
+  for (const [id, pt] of Object.entries(corners(bbox))) {
+    const [hx, hy] = i2c(pt.x, pt.y);
+    if (Math.hypot(cx - hx, cy - hy) < HANDLE_HIT) return id;
+  }
+  return null;
 }
 
-function zoomAt(cx, cy, factor) {
-  const ns = Math.max(MIN_SCALE, Math.min(MAX_SCALE, scale * factor));
-  offsetX = cx - (cx - offsetX) * (ns / scale);
-  offsetY = cy - (cy - offsetY) * (ns / scale);
-  scale = ns;
-  redraw();
+// ── bow resample ──────────────────────────────────────────────────────────────
+function resample(poly, n) {
+  if (poly.length === 1) return Array.from({length: n}, () => poly[0].slice());
+  const cum = [0];
+  for (let i = 1; i < poly.length; i++)
+    cum.push(cum[i - 1] + Math.hypot(poly[i][0] - poly[i - 1][0], poly[i][1] - poly[i - 1][1]));
+  const total = cum[cum.length - 1];
+  if (total === 0) return Array.from({length: n}, () => poly[0].slice());
+  const out = [];
+  for (let k = 0; k < n; k++) {
+    const target = total * k / (n - 1);
+    let i = 1; while (i < cum.length - 1 && cum[i] < target) i++;
+    const seg = (cum[i] - cum[i - 1]) || 1;
+    const t = (target - cum[i - 1]) / seg;
+    out.push([poly[i - 1][0] + (poly[i][0] - poly[i - 1][0]) * t,
+              poly[i - 1][1] + (poly[i][1] - poly[i - 1][1]) * t]);
+  }
+  return out;
+}
+function applyBowResample() {
+  if (bowDraft.length < 2) return false;
+  const s = resample(bowDraft, BOW_SAMPLES);
+  BOW_IDS.forEach((id, i) => { pts[id] = {x: s[i][0], y: s[i][1], visible: VIS_VISIBLE}; });
+  bowFinished = true;
+  markDirty();
+  return true;
 }
 
-function visLabel(v) {
-  return {0: 'unset', 1: 'occluded', 2: 'visible', 3: 'outside'}[v] || '?';
-}
-
-function markDirty() { dirty = true; updateSaveHint(); }
-
-function updateSaveHint() {
-  const el = document.getElementById('save-hint');
-  if (el) el.textContent = dirty ? '· unsaved' : '';
-}
-
-function setStatus(kind, msg) {
-  const st = document.getElementById('save-status');
-  if (!st) return;
-  st.textContent = msg;
-  st.className = 'save-status status-' + (kind || '');
-}
-
-function getMissingList() {
-  const missing = [];
-  keypoints.forEach(kp => {
-    if (!isAddressed(kp)) missing.push(kp.label_short || kp.name);
-    else if (kp.visible === VIS_VISIBLE && !hasCoords(kp)) missing.push(kp.label_short + ' (no coords)');
-  });
-  if (!bbox || bbox.w <= 0 || bbox.h <= 0) missing.push('bbox');
-  return missing;
-}
-
+// ── drawing ───────────────────────────────────────────────────────────────────
 function redraw() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.fillStyle = '#080810';
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  if (img.complete) ctx.drawImage(img, offsetX, offsetY, IMG_W * scale, IMG_H * scale);
+  ctx.fillStyle = '#05050c'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  if (img.complete) ctx.drawImage(img, offX, offY, IMG_W * scale, IMG_H * scale);
 
-  if (bbox?.w > 0 && bbox?.h > 0) {
-    const [bx, by] = imgToCanvas(bbox.x, bbox.y);
+  if (bbox && bbox.w > 0) {
+    const [bx, by] = i2c(bbox.x, bbox.y);
     ctx.save();
-    ctx.strokeStyle = '#00d4ff';
-    ctx.lineWidth = 2;
-    ctx.setLineDash([6, 4]);
+    ctx.strokeStyle = '#00d4ff'; ctx.lineWidth = 2; ctx.setLineDash([6, 4]);
     ctx.strokeRect(bx, by, bbox.w * scale, bbox.h * scale);
     ctx.fillStyle = 'rgba(0,212,255,0.05)';
     ctx.fillRect(bx, by, bbox.w * scale, bbox.h * scale);
     ctx.restore();
-    drawBboxHandles();
+    if (tool === 'bbox' && !REVIEW) {
+      Object.values(corners(bbox)).forEach(pt => {
+        const [hx, hy] = i2c(pt.x, pt.y);
+        ctx.fillStyle = '#00d4ff'; ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.arc(hx, hy, 6, 0, 7); ctx.fill(); ctx.stroke();
+      });
+    }
   }
 
+  // skeleton
   CONNECTIONS.forEach(([a, b]) => {
-    const A = keypoints[a], B = keypoints[b];
-    if (!A || !B || !isDrawable(A) || !isDrawable(B)) return;
-    const [ax, ay] = imgToCanvas(A.x, A.y);
-    const [bx, by2] = imgToCanvas(B.x, B.y);
-    ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by2);
-    ctx.strokeStyle = A.group === 'bow' ? 'rgba(255,120,50,0.65)' : 'rgba(150,200,180,0.4)';
-    ctx.lineWidth = 1.5; ctx.stroke();
+    if (!drawable(a) || !drawable(b)) return;
+    const [ax, ay] = i2c(pts[a].x, pts[a].y), [bx, by] = i2c(pts[b].x, pts[b].y);
+    ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by);
+    ctx.strokeStyle = DEF[a].group === 'bow' ? 'rgba(245,158,11,0.7)' : 'rgba(120,200,170,0.5)';
+    ctx.lineWidth = 2; ctx.stroke();
   });
 
-  keypoints.forEach((kp, idx) => {
-    if (groupFilter && kp.group !== groupFilter) return;
-    if (!isDrawable(kp)) return;
+  // bow draft (being traced)
+  if (tool === 'bow' && !bowFinished && bowDraft.length) {
+    ctx.save();
+    ctx.strokeStyle = 'rgba(245,158,11,0.9)'; ctx.lineWidth = 2; ctx.setLineDash([5, 4]);
+    ctx.beginPath();
+    bowDraft.forEach((p, i) => { const [cx, cy] = i2c(p[0], p[1]); i ? ctx.lineTo(cx, cy) : ctx.moveTo(cx, cy); });
+    if (mouseImg.x >= 0) { const [cx, cy] = i2c(mouseImg.x, mouseImg.y); ctx.lineTo(cx, cy); }
+    ctx.stroke(); ctx.setLineDash([]);
+    bowDraft.forEach(p => { const [cx, cy] = i2c(p[0], p[1]);
+      ctx.beginPath(); ctx.arc(cx, cy, 4, 0, 7); ctx.fillStyle = '#f59e0b'; ctx.fill(); });
+    ctx.restore();
+  }
 
-    const [cx, cy] = imgToCanvas(kp.x, kp.y);
-    const isSel = idx === selectedKP;
-    const isOcc = kp.visible === VIS_OCCLUDED;
-    const r = isSel ? POINT_SELECTED : POINT_RADIUS;
-
-    if (isSel) {
-      ctx.beginPath(); ctx.arc(cx, cy, r + 6, 0, Math.PI * 2);
-      ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.stroke();
-    }
-    ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2);
-    ctx.fillStyle = isOcc ? 'rgba(25,25,35,0.92)' : kp.color;
-    ctx.fill();
-    if (isOcc) {
-      ctx.strokeStyle = kp.color; ctx.lineWidth = 2; ctx.stroke();
-      ctx.beginPath();
-      ctx.moveTo(cx - 4, cy - 4); ctx.lineTo(cx + 4, cy + 4);
-      ctx.moveTo(cx + 4, cy - 4); ctx.lineTo(cx - 4, cy + 4);
-      ctx.stroke();
+  // points
+  SCHEMA.forEach(d => {
+    if (!drawable(d.id)) return;
+    const p = pts[d.id];
+    const [cx, cy] = i2c(p.x, p.y);
+    const sel = (tool === 'point' && d.id === selectedId);
+    const occ = p.visible === VIS_OCCLUDED;
+    const r = sel ? R_SEL : R_POINT;
+    if (sel) { ctx.beginPath(); ctx.arc(cx, cy, r + 5, 0, 7); ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.stroke(); }
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, 7);
+    ctx.fillStyle = occ ? 'rgba(20,20,30,0.9)' : d.color; ctx.fill();
+    if (occ) {
+      ctx.strokeStyle = d.color; ctx.lineWidth = 2; ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(cx - 4, cy - 4); ctx.lineTo(cx + 4, cy + 4);
+      ctx.moveTo(cx + 4, cy - 4); ctx.lineTo(cx - 4, cy + 4); ctx.stroke();
     }
   });
 
-  const cur = keypoints[selectedKP];
-  if (mode === 'keypoint' && cur && !hasCoords(cur) && cur.visible !== VIS_OUTSIDE
-      && cur.visible !== VIS_OCCLUDED && mouseImgPos.x >= 0) {
-    const [gx, gy] = imgToCanvas(mouseImgPos.x, mouseImgPos.y);
-    ctx.beginPath(); ctx.arc(gx, gy, POINT_RADIUS, 0, Math.PI * 2);
-    ctx.strokeStyle = cur.color; ctx.lineWidth = 2; ctx.setLineDash([4, 4]); ctx.stroke();
-    ctx.setLineDash([]);
-  }
-
-  if (isPanning || spaceHeld) {
-    canvas.style.cursor = 'grab';
+  // ghost cursor for point placement
+  if (!REVIEW && tool === 'point' && mouseImg.x >= 0) {
+    const p = pts[selectedId];
+    if (p.visible !== VIS_OUTSIDE && !hasXY(p)) {
+      const [gx, gy] = i2c(mouseImg.x, mouseImg.y);
+      ctx.beginPath(); ctx.arc(gx, gy, R_POINT, 0, 7);
+      ctx.strokeStyle = DEF[selectedId].color; ctx.lineWidth = 2; ctx.setLineDash([4, 4]); ctx.stroke(); ctx.setLineDash([]);
+    }
   }
 }
 
-function updateCurrentCard() {
-  const cur = keypoints[selectedKP];
-  if (!cur) return;
-  const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
-  set('kp-current-name', `${selectedKP + 1}. ${cur.label_short}`);
-  set('kp-current-sub', cur.name);
-  set('kp-current-desc', cur.desc);
-  const visEl = document.getElementById('kp-current-vis');
-  if (visEl) {
-    visEl.textContent = visLabel(cur.visible);
-    visEl.className = 'vis-badge vis-' + cur.visible;
-  }
-}
-
-function updatePanel() {
-  keypoints.forEach((kp, idx) => {
-    const item = document.getElementById(`kp-item-${kp.kp_id}`);
-    const stat = document.getElementById(`kp-status-${kp.kp_id}`);
-    if (!item || !stat) return;
-    item.classList.toggle('kp-selected', idx === selectedKP);
-    item.classList.toggle('kp-dimmed', groupFilter && kp.group !== groupFilter);
-    item.classList.toggle('kp-done', isAddressed(kp));
-
-    if (!isAddressed(kp)) { stat.textContent = 'unset'; stat.style.color = '#555'; }
-    else if (kp.visible === VIS_VISIBLE) { stat.textContent = 'visible'; stat.style.color = kp.color; }
-    else if (kp.visible === VIS_OCCLUDED) { stat.textContent = 'occluded'; stat.style.color = '#fbbf24'; }
-    else if (kp.visible === VIS_OUTSIDE) { stat.textContent = 'outside'; stat.style.color = '#888'; }
+// ── panel / list ──────────────────────────────────────────────────────────────
+function buildList() {
+  const wrap = document.getElementById('kp-list');
+  if (!wrap) return;
+  let html = '', lastGroup = null;
+  POINT_DEFS.forEach((d, i) => {
+    if (d.group !== lastGroup) {
+      lastGroup = d.group;
+      html += `<div class="kp-group-label">${GROUP_LABELS[d.group] || d.group}</div>`;
+    }
+    html += `<div class="kp-item" id="it-${d.id}" onclick="selectPoint(${d.id})">
+      <span class="kp-dot" style="background:${d.color}"></span>
+      <span class="kp-name">${i + 1 <= 9 ? (i + 1) + '. ' : ''}${d.label}</span>
+      <span class="kp-chip" id="chip-${d.id}">unset</span></div>`;
   });
-  document.getElementById(`kp-item-${SCHEMA[selectedKP]?.id}`)
-    ?.scrollIntoView({block: 'nearest', behavior: 'smooth'});
-  updateCurrentCard();
+  wrap.innerHTML = html;
+}
+function selectPoint(id) { selectedId = id; if (tool !== 'point') setTool('point'); redraw(); refreshPanel(); }
+
+function refreshPanel() {
+  POINT_DEFS.forEach(d => {
+    const it = document.getElementById(`it-${d.id}`);
+    const chip = document.getElementById(`chip-${d.id}`);
+    if (!it || !chip) return;
+    it.classList.toggle('sel', d.id === selectedId && tool === 'point');
+    const v = pts[d.id].visible;
+    chip.textContent = VIS_NAME[v];
+    chip.style.color = v === VIS_VISIBLE ? d.color : v === VIS_OCCLUDED ? '#fcd34d'
+                     : v === VIS_OUTSIDE ? '#f472b6' : '#666';
+  });
+  const d = DEF[selectedId];
+  if (d) {
+    const set = (id, t) => { const el = document.getElementById(id); if (el) el.textContent = t; };
+    set('sc-name', d.label); set('sc-sub', d.name); set('sc-desc', d.desc);
+    const dot = document.getElementById('sc-dot'); if (dot) dot.style.background = d.color;
+    const vb = document.getElementById('sc-vis');
+    if (vb) { vb.textContent = VIS_NAME[pts[d.id].visible]; vb.className = 'vis-badge vis-' + pts[d.id].visible; }
+  }
+  const bc = document.getElementById('bow-count'); if (bc) bc.textContent = bowFinished ? BOW_SAMPLES : bowDraft.length;
+  updateHint();
 }
 
-function updateProgress() {
-  const addressed = keypoints.filter(isAddressed).length;
-  const visible = keypoints.filter(k => k.visible === VIS_VISIBLE).length;
-  const bar = document.getElementById('kp-progress-bar');
-  const label = document.getElementById('kp-progress-label');
-  if (bar) bar.style.width = Math.round(addressed / 9 * 100) + '%';
-  if (label) label.textContent = `${addressed}/9 · visible ${visible}`;
-  const bboxEl = document.getElementById('bbox-status');
-  if (bboxEl) {
-    bboxEl.textContent = bbox?.w > 0 ? 'bbox ok' : 'bbox needed';
-    bboxEl.style.color = bbox?.w > 0 ? 'var(--green)' : 'var(--warn)';
-  }
+function updateMetrics() {
+  const core = CORE_IDS.filter(addressed).length;
+  const mc = document.getElementById('m-core'); if (mc) mc.textContent = core;
+  const bar = document.getElementById('m-bar'); if (bar) bar.style.width = Math.round(core / CORE_N * 100) + '%';
+  const mb = document.getElementById('m-bbox');
+  if (mb) { const ok = bbox && bbox.w > 0; mb.textContent = ok ? 'bbox ok' : 'bbox needed';
+    mb.style.color = ok ? 'var(--green)' : 'var(--warn)'; }
 }
 
-function setVisState(vis) {
-  const kp = keypoints[selectedKP];
-  if (vis === VIS_VISIBLE && !hasCoords(kp)) {
-    setStatus('warn', 'Click image to place a visible point');
-    return;
-  }
-  kp.visible = vis;
-  if (vis === VIS_OUTSIDE) { kp.x = null; kp.y = null; }
-  if (vis === VIS_OCCLUDED && !hasCoords(kp)) { kp.x = null; kp.y = null; }
-  markDirty();
-  advanceToNext();
-  redraw(); updatePanel(); updateProgress();
-}
-
-function advanceToNext() {
-  const indices = activeIndices();
-  const pos = indices.indexOf(selectedKP);
-  const next = indices.slice(pos + 1).find(i => !isAddressed(keypoints[i]));
-  if (next !== undefined) selectedKP = next;
-}
-
-function startPan(cx, cy) {
-  isPanning = true;
-  panStart = {cx, cy, ox: offsetX, oy: offsetY};
-  canvas.style.cursor = 'grabbing';
-}
-
-function canvasCoords(e) {
-  const rect = canvas.getBoundingClientRect();
-  return [e.clientX - rect.left, e.clientY - rect.top];
-}
-
-canvas.addEventListener('mousemove', e => {
-  const [cx, cy] = canvasCoords(e);
-  const [ix, iy] = canvasToImg(cx, cy);
-  mouseImgPos = {x: ix, y: iy};
-
-  if (isPanning && panStart) {
-    offsetX = panStart.ox + (cx - panStart.cx);
-    offsetY = panStart.oy + (cy - panStart.cy);
-    redraw(); return;
-  }
-  if (isDragging && dragTarget?.type === 'kp') {
-    const [nx, ny] = clampImg(ix, iy);
-    const kp = keypoints[dragTarget.idx];
-    kp.x = nx; kp.y = ny;
-    kp.visible = VIS_VISIBLE;
-    markDirty();
-    redraw(); updatePanel(); updateProgress(); return;
-  }
-  if (isDragging && dragTarget?.type === 'bbox' && bboxStart) {
-    const [nx, ny] = clampImg(ix, iy);
-    bbox = bboxFromAnchor({x: bboxStart[0], y: bboxStart[1]}, nx, ny);
-    markDirty();
-    redraw(); updateProgress(); return;
-  }
-  if (isDragging && dragTarget?.type === 'bbox-handle') {
-    const [nx, ny] = clampImg(ix, iy);
-    bbox = bboxFromAnchor(dragTarget.anchor, nx, ny);
-    markDirty();
-    redraw(); updateProgress(); return;
-  }
-  if (isDragging && dragTarget?.type === 'bbox-move') {
-    const dx = ix - dragTarget.startX;
-    const dy = iy - dragTarget.startY;
-    let nx = dragTarget.orig.x + dx;
-    let ny = dragTarget.orig.y + dy;
-    nx = Math.max(0, Math.min(IMG_W - dragTarget.orig.w, nx));
-    ny = Math.max(0, Math.min(IMG_H - dragTarget.orig.h, ny));
-    bbox = {x: nx, y: ny, w: dragTarget.orig.w, h: dragTarget.orig.h};
-    markDirty();
-    redraw(); updateProgress(); return;
-  }
-
-  if (spaceHeld) canvas.style.cursor = 'grab';
-  else if (mode === 'bbox') {
-    const handle = getHitBboxHandle(cx, cy);
-    if (handle) canvas.style.cursor = BBOX_CURSORS[handle];
-    else if (pointInBbox(ix, iy)) canvas.style.cursor = 'move';
-    else canvas.style.cursor = 'crosshair';
-    redraw();
-  }
-  else canvas.style.cursor = getHitKP(cx, cy) >= 0 ? 'move' : 'crosshair';
-
-  if (mode === 'keypoint') redraw();
-});
-
-canvas.addEventListener('mousedown', e => {
-  const [cx, cy] = canvasCoords(e);
-  const [ix, iy] = canvasToImg(cx, cy);
-
-  if (e.button === 1 || (e.button === 0 && (spaceHeld || e.altKey))) {
-    startPan(cx, cy); e.preventDefault(); return;
-  }
-
-  if (mode === 'bbox' && e.button === 0) {
-    const handle = getHitBboxHandle(cx, cy);
-    if (handle && bbox) {
-      const corners = bboxCorners(bbox);
-      isDragging = true;
-      dragTarget = {type: 'bbox-handle', corner: handle, anchor: corners[BBOX_OPPOSITE[handle]]};
-      return;
-    }
-    if (pointInBbox(ix, iy) && bbox) {
-      isDragging = true;
-      dragTarget = {type: 'bbox-move', startX: ix, startY: iy, orig: {...bbox}};
-      return;
-    }
-    const [nx, ny] = clampImg(ix, iy);
-    bboxStart = [nx, ny];
-    bbox = {x: nx, y: ny, w: 0, h: 0};
-    isDragging = true; dragTarget = {type: 'bbox'};
-    markDirty();
-    return;
-  }
-
-  if (e.button !== 0) return;
-
-  const hit = getHitKP(cx, cy);
-  if (hit >= 0) {
-    isDragging = true;
-    dragTarget = {type: 'kp', idx: hit};
-    selectedKP = hit;
-    updatePanel();
-    return;
-  }
-
-  const kp = keypoints[selectedKP];
-  if (kp.visible === VIS_OUTSIDE) return;
-
-  const [nx, ny] = clampImg(ix, iy);
-  kp.x = nx; kp.y = ny;
-  kp.visible = VIS_VISIBLE;
-  markDirty();
-  redraw(); updatePanel(); updateProgress();
-  advanceToNext();
-});
-
-canvas.addEventListener('mouseup', () => {
-  if (dragTarget?.type === 'bbox' && bbox && (bbox.w < 8 || bbox.h < 8)) {
-    bbox = null;
-    setStatus('warn', 'bbox too small — drag again');
-  }
-  bboxStart = null;
-  isDragging = false; dragTarget = null;
-  if (isPanning) { isPanning = false; panStart = null; }
-  redraw(); updateProgress();
-});
-
-canvas.addEventListener('contextmenu', e => {
-  e.preventDefault();
-  const [cx, cy] = canvasCoords(e);
-  const hit = getHitKP(cx, cy);
-  if (hit >= 0) {
-    const kp = keypoints[hit];
-    if (hasCoords(kp)) {
-      kp.visible = kp.visible === VIS_OCCLUDED ? VIS_VISIBLE : VIS_OCCLUDED;
-    } else {
-      kp.visible = VIS_OCCLUDED;
-      kp.x = null; kp.y = null;
-    }
-    selectedKP = hit;
+function updateHint() {
+  const el = document.getElementById('canvas-hint'); if (!el) return;
+  if (REVIEW) { el.innerHTML = 'Read-only <b>review</b> · pan Space/Alt+drag · zoom wheel'; return; }
+  if (tool === 'point') {
+    const d = DEF[selectedId];
+    el.innerHTML = `Place <b>${d ? d.label : ''}</b> — click the image. Right-click = occluded.`;
+  } else if (tool === 'bow') {
+    el.innerHTML = bowFinished
+      ? 'Bow set. Drag a point to nudge, or <b>Redraw</b> to trace again.'
+      : 'Trace the <b>visible stick</b> (frog→tip): click points, then <b>Enter</b>.';
   } else {
-    setVisState(VIS_OCCLUDED);
-    return;
+    el.innerHTML = 'Box: <b>drag</b> to draw · corners resize · inside to move.';
   }
-  markDirty();
-  redraw(); updatePanel(); updateProgress();
-});
+}
 
-canvas.addEventListener('wheel', e => {
-  e.preventDefault();
-  const [cx, cy] = canvasCoords(e);
-  if (e.shiftKey) {
-    offsetX -= e.deltaY * 0.4;
-    redraw();
-    return;
-  }
-  const delta = -e.deltaY;
-  const factor = Math.exp(delta * WHEEL_ZOOM_SENS);
-  const clamped = Math.max(ZOOM_OUT, Math.min(ZOOM_IN, factor));
-  zoomAt(cx, cy, clamped);
-}, {passive: false});
+// ── tools ─────────────────────────────────────────────────────────────────────
+function setTool(t, silent) {
+  tool = t;
+  document.querySelectorAll('.an-tab').forEach(b => b.classList.toggle('active', b.dataset.tool === t));
+  const pp = document.getElementById('pane-point'), pb = document.getElementById('pane-bow');
+  if (pp) pp.style.display = (t === 'bow') ? 'none' : '';
+  if (pb) pb.style.display = (t === 'bow') ? '' : 'none';
+  if (!silent) { redraw(); refreshPanel(); }
+  updateHint();
+}
 
-window.addEventListener('resize', () => { fitToCanvas(); redraw(); });
+function setVis(v) {
+  if (REVIEW) return;
+  const p = pts[selectedId];
+  if (v === VIS_VISIBLE && !hasXY(p)) { setStatus('warn', 'click image to place point'); return; }
+  p.visible = v;
+  if (v === VIS_OUTSIDE) { p.x = null; p.y = null; }
+  markDirty(); advancePoint(); redraw(); refreshPanel(); updateMetrics();
+}
+function selectFirstUnaddressed() {
+  const first = POINT_DEFS.find(d => !addressed(d.id) && !d.optional);
+  selectedId = first ? first.id : POINT_DEFS[0].id;
+}
+function advancePoint() {
+  const order = POINT_DEFS.filter(d => !d.optional);
+  const idx = order.findIndex(d => d.id === selectedId);
+  const next = order.slice(idx + 1).find(d => !addressed(d.id));
+  if (next) selectedId = next.id;
+}
 
-document.addEventListener('keydown', e => {
-  if (e.code === 'Space' && e.target.tagName !== 'TEXTAREA' && e.target.tagName !== 'INPUT') {
-    spaceHeld = true; e.preventDefault();
-  }
-});
-document.addEventListener('keyup', e => {
-  if (e.code === 'Space') { spaceHeld = false; redraw(); }
-});
+// bow actions
+function finishBow() { if (applyBowResample()) { redraw(); refreshPanel(); updateMetrics(); setStatus('ok', 'bow set'); }
+  else setStatus('warn', 'place at least 2 points'); }
+function undoBowVertex() { if (!bowFinished && bowDraft.length) { bowDraft.pop(); redraw(); refreshPanel(); } }
+function redrawBow() { bowFinished = false; bowDraft = []; BOW_IDS.forEach(id => pts[id] = {x: null, y: null, visible: VIS_UNSET});
+  markDirty(); redraw(); refreshPanel(); updateMetrics(); }
+function clearBow() { redrawBow(); setStatus('warn', 'bow marked not visible'); }
 
-function getHitKP(cx, cy) {
-  for (let i = keypoints.length - 1; i >= 0; i--) {
-    const kp = keypoints[i];
-    if (!isDrawable(kp)) continue;
-    const [kx, ky] = imgToCanvas(kp.x, kp.y);
-    if (Math.hypot(cx - kx, cy - ky) < HIT_RADIUS) return i;
+function getHitPoint(cx, cy) {
+  const ids = SCHEMA.map(d => d.id).filter(drawable);
+  for (let i = ids.length - 1; i >= 0; i--) {
+    const [x, y] = i2c(pts[ids[i]].x, pts[ids[i]].y);
+    if (Math.hypot(cx - x, cy - y) < HIT) return ids[i];
   }
   return -1;
 }
 
-function selectKP(idx) {
-  if (idx >= 0 && idx < keypoints.length) { selectedKP = idx; redraw(); updatePanel(); }
-}
+// ── mouse ─────────────────────────────────────────────────────────────────────
+canvas.addEventListener('mousemove', e => {
+  const [cx, cy] = cpos(e);
+  [mouseImg.x, mouseImg.y] = c2i(cx, cy);
 
-function setGroupFilter(g) {
-  groupFilter = g === 'all' ? null : g;
-  document.querySelectorAll('.group-filter-btn').forEach(b =>
-    b.classList.toggle('active', b.dataset.group === (g || 'all')));
-  redraw(); updatePanel();
-}
+  if (panning) { offX = panning.ox + (cx - panning.cx); offY = panning.oy + (cy - panning.cy); redraw(); return; }
+  if (dragging) {
+    const [ix, iy] = c2i(cx, cy);
+    if (dragging.type === 'pt') { const [nx, ny] = clampImg(ix, iy); const p = pts[dragging.id];
+      p.x = nx; p.y = ny; if (p.visible === VIS_UNSET || p.visible === VIS_OUTSIDE) p.visible = VIS_VISIBLE;
+      markDirty(); redraw(); refreshPanel(); updateMetrics(); return; }
+    if (dragging.type === 'bbox') { const [nx, ny] = clampImg(ix, iy); bbox = bboxFrom(dragging.ax, dragging.ay, nx, ny); markDirty(); redraw(); updateMetrics(); return; }
+    if (dragging.type === 'handle') { const [nx, ny] = clampImg(ix, iy); bbox = bboxFrom(dragging.anchor.x, dragging.anchor.y, nx, ny); markDirty(); redraw(); return; }
+    if (dragging.type === 'move') { const dx = ix - dragging.sx, dy = iy - dragging.sy;
+      let nx = Math.max(0, Math.min(IMG_W - dragging.o.w, dragging.o.x + dx));
+      let ny = Math.max(0, Math.min(IMG_H - dragging.o.h, dragging.o.y + dy));
+      bbox = {x: nx, y: ny, w: dragging.o.w, h: dragging.o.h}; markDirty(); redraw(); return; }
+  }
 
-function setMode(m) {
-  mode = m;
-  document.getElementById('mode-kp')?.classList.toggle('active', m === 'keypoint');
-  document.getElementById('mode-bbox')?.classList.toggle('active', m === 'bbox');
-  document.getElementById('mode-hint').textContent =
-    m === 'bbox'
-      ? 'Drag bbox · drag corners to resize · drag inside to move · Space/Alt+drag pan'
-      : 'Click=visible · Right-click=occluded · Space/Alt=pan';
-}
+  if (spaceHeld) canvas.style.cursor = 'grab';
+  else if (tool === 'bbox') { const h = hitHandle(cx, cy); canvas.style.cursor = h ? CURS[h] : inBbox(...c2i(cx, cy)) ? 'move' : 'crosshair'; }
+  else canvas.style.cursor = getHitPoint(cx, cy) >= 0 ? 'move' : 'crosshair';
 
-function resetSelectedKP() {
-  const kp = keypoints[selectedKP];
-  kp.visible = VIS_UNSET; kp.x = null; kp.y = null;
-  markDirty();
-  redraw(); updatePanel(); updateProgress();
-}
+  if (tool === 'point' || tool === 'bow') redraw();
+});
 
-function resetAll() {
-  if (!confirm('Reset all keypoints and bbox on this frame?')) return;
-  keypoints.forEach(k => { k.x = null; k.y = null; k.visible = VIS_UNSET; });
-  bbox = null; selectedKP = 0;
-  markDirty();
-  redraw(); updatePanel(); updateProgress();
-}
+canvas.addEventListener('mousedown', e => {
+  const [cx, cy] = cpos(e);
+  const [ix, iy] = c2i(cx, cy);
 
-async function copyFromPrev() {
-  setStatus('', 'Loading previous…');
-  try {
-    const d = await (await fetch(`/api/annotations/prev/${FRAME_ID}`)).json();
-    if (!d?.keypoints) { setStatus('warn', 'No previous annotation'); return; }
-    d.keypoints.forEach(e => {
-      const kp = keypoints.find(k => k.kp_id === e.kp_id);
-      if (kp && e.visible !== VIS_UNSET) normalizeLoadedKp(kp, e);
-    });
-    if (d.bbox?.w > 0) bbox = {...d.bbox};
-    selectedKP = keypoints.findIndex(k => !isAddressed(k));
-    if (selectedKP < 0) selectedKP = 0;
-    markDirty();
-    redraw(); updatePanel(); updateProgress();
-    setStatus('ok', 'Copied from previous frame');
-  } catch (e) { setStatus('error', e.message); }
+  if (e.button === 1 || (e.button === 0 && (spaceHeld || e.altKey))) {
+    panning = {cx, cy, ox: offX, oy: offY}; canvas.style.cursor = 'grabbing'; e.preventDefault(); return;
+  }
+  if (REVIEW || e.button !== 0) return;
+
+  if (tool === 'bbox') {
+    const h = hitHandle(cx, cy);
+    if (h && bbox) { dragging = {type: 'handle', anchor: corners(bbox)[OPP[h]]}; return; }
+    if (inBbox(ix, iy) && bbox) { dragging = {type: 'move', sx: ix, sy: iy, o: {...bbox}}; return; }
+    const [nx, ny] = clampImg(ix, iy);
+    dragging = {type: 'bbox', ax: nx, ay: ny}; bbox = {x: nx, y: ny, w: 0, h: 0}; markDirty(); return;
+  }
+
+  // point/bow: dragging an existing point
+  const hit = getHitPoint(cx, cy);
+  if (hit >= 0) {
+    if (POINT_DEFS.some(d => d.id === hit)) { selectedId = hit; refreshPanel(); }
+    dragging = {type: 'pt', id: hit}; return;
+  }
+
+  if (tool === 'bow') {
+    if (bowFinished) return;                 // redraw to edit
+    const [nx, ny] = clampImg(ix, iy);
+    bowDraft.push([nx, ny]); markDirty(); redraw(); refreshPanel(); return;
+  }
+
+  // point tool: place selected
+  const p = pts[selectedId];
+  if (p.visible === VIS_OUTSIDE) return;
+  const [nx, ny] = clampImg(ix, iy);
+  p.x = nx; p.y = ny; p.visible = VIS_VISIBLE;
+  markDirty(); redraw(); refreshPanel(); updateMetrics(); advancePoint();
+});
+
+canvas.addEventListener('mouseup', () => {
+  if (dragging?.type === 'bbox' && bbox && (bbox.w < 6 || bbox.h < 6)) { bbox = null; setStatus('warn', 'bbox too small'); }
+  dragging = null;
+  if (panning) { panning = null; }
+  redraw(); updateMetrics();
+});
+
+canvas.addEventListener('contextmenu', e => {
+  e.preventDefault();
+  if (REVIEW) return;
+  const [cx, cy] = cpos(e);
+  const hit = getHitPoint(cx, cy);
+  if (hit >= 0) {
+    const p = pts[hit];
+    p.visible = p.visible === VIS_OCCLUDED ? VIS_VISIBLE : VIS_OCCLUDED;
+    if (POINT_DEFS.some(d => d.id === hit)) { selectedId = hit; }
+    markDirty(); redraw(); refreshPanel(); updateMetrics();
+  } else if (tool === 'point') {
+    setVis(VIS_OCCLUDED);
+  }
+});
+
+canvas.addEventListener('wheel', e => {
+  e.preventDefault();
+  const [cx, cy] = cpos(e);
+  if (e.shiftKey) { offX -= e.deltaY * 0.5; redraw(); return; }
+  zoomAt(cx, cy, Math.exp(-e.deltaY * WHEEL_SENS));
+}, {passive: false});
+
+window.addEventListener('resize', () => { fitToCanvas(); redraw(); });
+
+// ── keyboard ──────────────────────────────────────────────────────────────────
+document.addEventListener('keydown', e => {
+  if (e.code === 'Space' && !/^(TEXTAREA|INPUT|SELECT)$/.test(e.target.tagName)) { spaceHeld = true; e.preventDefault(); }
+});
+document.addEventListener('keyup', e => { if (e.code === 'Space') { spaceHeld = false; redraw(); } });
+
+document.addEventListener('keydown', e => {
+  if (/^(TEXTAREA|INPUT|SELECT)$/.test(e.target.tagName)) return;
+  if (REVIEW) {
+    if (e.key === 'ArrowLeft' && PREV_ID) location.href = `/annotate/${PREV_ID}?as_user=${new URLSearchParams(location.search).get('as_user')||''}`;
+    if (e.key === 'ArrowRight' && NEXT_ID) location.href = `/annotate/${NEXT_ID}?as_user=${new URLSearchParams(location.search).get('as_user')||''}`;
+    return;
+  }
+  switch (e.key) {
+    case 'Enter': e.preventDefault(); tool === 'bow' && !bowFinished ? finishBow() : goNext(); return;
+    case 'Backspace': if (tool === 'bow') { e.preventDefault(); undoBowVertex(); } return;
+    case 'ArrowLeft': if (PREV_ID) location.href = `/annotate/${PREV_ID}`; return;
+    case 's': case 'S': e.preventDefault(); saveAnnotation(false); return;
+    case 'c': case 'C': copyFromPrev(); return;
+    case 'b': case 'B': setTool('bow'); return;
+    case 'n': case 'N': setTool('bbox'); return;
+    case 'v': case 'V': setVis(VIS_VISIBLE); return;
+    case 'o': case 'O': setVis(VIS_OCCLUDED); return;
+    case 'x': case 'X': setVis(VIS_OUTSIDE); return;
+    case 'f': case 'F': fitToCanvas(); redraw(); return;
+    case '+': case '=': zoomBtn(1); return;
+    case '-': case '_': zoomBtn(-1); return;
+  }
+  if (e.key >= '1' && e.key <= '9') {
+    const idx = parseInt(e.key) - 1;
+    if (idx < POINT_DEFS.length) selectPoint(POINT_DEFS[idx].id);
+  }
+});
+
+// ── save / status ─────────────────────────────────────────────────────────────
+function markDirty() { dirty = true; setStatus('', 'unsaved'); }
+function setStatus(kind, msg) { const el = document.getElementById('save-status'); if (el) { el.textContent = msg; el.className = 'save-status ' + kind; } }
+
+function getMissing() {
+  const miss = [];
+  CORE_IDS.forEach(id => {
+    if (!addressed(id)) miss.push(DEF[id].label);
+    else if (pts[id].visible === VIS_VISIBLE && !hasXY(pts[id])) miss.push(DEF[id].label + ' (no coords)');
+  });
+  if (!bbox || bbox.w <= 0) miss.push('bbox');
+  return miss;
 }
 
 function buildPayload() {
   return {
     frame_id: FRAME_ID,
-    keypoints: keypoints.map(k => ({
-      kp_id: k.kp_id,
-      x: hasCoords(k) ? k.x : null,
-      y: hasCoords(k) ? k.y : null,
-      visible: k.visible,
+    keypoints: SCHEMA.map(d => ({
+      kp_id: d.id,
+      x: hasXY(pts[d.id]) ? pts[d.id].x : null,
+      y: hasXY(pts[d.id]) ? pts[d.id].y : null,
+      visible: pts[d.id].visible,
     })),
-    bbox: bbox?.w > 0 ? bbox : null,
-    notes: document.getElementById('notes').value,
+    bbox: (bbox && bbox.w > 0) ? bbox : null,
+    meta: {bow_polyline: bowFinished && bowDraft.length >= 2 ? bowDraft : null},
+    notes: document.getElementById('notes')?.value || '',
     quality: document.getElementById('quality')?.value || null,
   };
 }
 
+let saving = null;
 async function saveToServer() {
-  if (saveInFlight) return saveInFlight;
-  saveInFlight = (async () => {
-    const r = await fetch('/api/annotations', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(buildPayload()),
-    });
-    let d = {};
-    try { d = await r.json(); } catch (_) {}
-    if (!r.ok) throw new Error(d.error || `Save failed (${r.status})`);
-    if (d.error) throw new Error(d.error);
+  if (saving) return saving;
+  saving = (async () => {
+    const r = await fetch('/api/annotations', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(buildPayload())});
+    let d = {}; try { d = await r.json(); } catch (_) {}
+    if (!r.ok) throw new Error(d.error || `save failed (${r.status})`);
     dirty = false;
-    updateSaveHint();
     return d;
   })();
-  try {
-    return await saveInFlight;
-  } finally {
-    saveInFlight = null;
-  }
+  try { return await saving; } finally { saving = null; }
 }
 
-async function saveAnnotation(autoAdvance = false) {
+async function saveAnnotation(advance) {
   try {
     const d = await saveToServer();
-    if (d.complete) {
-      setStatus('ok', 'Saved (complete)');
-      if (autoAdvance && NEXT_ID) setTimeout(() => { location.href = `/annotate/${NEXT_ID}`; }, 300);
-    } else {
-      setStatus('warn', 'Saved draft — missing: ' + (d.missing || []).join(', '));
-      if (autoAdvance && NEXT_ID) {
-        const go = confirm('Incomplete:\n' + (d.missing || []).join('\n') + '\n\nGo to next frame anyway?');
-        if (go) location.href = `/annotate/${NEXT_ID}`;
-      }
-    }
+    if (d.complete) { setStatus('ok', 'saved'); if (advance && NEXT_ID) setTimeout(() => location.href = `/annotate/${NEXT_ID}`, 250); }
+    else { setStatus('warn', 'draft'); if (advance) maybeAdvance(d.missing || []); }
   } catch (e) { setStatus('error', e.message); }
 }
-
+function maybeAdvance(missing) {
+  if (!NEXT_ID) return;
+  if (confirm('Incomplete:\n• ' + missing.join('\n• ') + '\n\nGo to next frame anyway?')) location.href = `/annotate/${NEXT_ID}`;
+}
 async function goNext() {
-  const missing = getMissingList();
-  if (missing.length) {
-    const go = confirm('Incomplete:\n• ' + missing.join('\n• ') + '\n\nSave and go to next?');
-    if (!go) return;
-  }
+  const miss = getMissing();
+  if (miss.length && !confirm('Incomplete:\n• ' + miss.join('\n• ') + '\n\nSave draft and go to next?')) return;
+  try { await saveToServer(); if (NEXT_ID) location.href = `/annotate/${NEXT_ID}`; else setStatus('ok', 'saved (last frame)'); }
+  catch (e) { setStatus('error', e.message); }
+}
+
+async function copyFromPrev() {
   try {
-    await saveToServer();
-    if (NEXT_ID) location.href = `/annotate/${NEXT_ID}`;
+    const d = await (await fetch(`/api/annotations/prev/${FRAME_ID}`)).json();
+    if (!d || !d.keypoints) { setStatus('warn', 'no previous annotation'); return; }
+    d.keypoints.forEach(e => { const p = pts[e.kp_id]; if (!p || e.visible === VIS_UNSET) return;
+      p.visible = e.visible; if (e.visible === VIS_OUTSIDE) { p.x = null; p.y = null; } else { p.x = e.x; p.y = e.y; } });
+    if (d.bbox && d.bbox.w > 0) bbox = {...d.bbox};
+    if (d.meta && d.meta.bow_polyline) { bowDraft = d.meta.bow_polyline.map(p => [p[0], p[1]]); bowFinished = true; }
+    else bowFinished = BOW_IDS.some(id => hasXY(pts[id]));
+    markDirty(); selectFirstUnaddressed(); redraw(); refreshPanel(); updateMetrics();
+    setStatus('ok', 'copied previous');
   } catch (e) { setStatus('error', e.message); }
 }
-
-function zoomButton(dir) {
-  zoomAt(canvas.width / 2, canvas.height / 2, dir > 0 ? ZOOM_IN : ZOOM_OUT);
-}
-
-document.addEventListener('keydown', e => {
-  if (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
-  switch (e.key) {
-    case 'Enter': e.preventDefault(); saveAnnotation(true); break;
-    case 'ArrowRight': e.preventDefault(); goNext(); break;
-    case 'ArrowLeft':
-      if (PREV_ID) location.href = `/annotate/${PREV_ID}`;
-      else history.back();
-      break;
-    case 'c': case 'C': copyFromPrev(); break;
-    case 'b': case 'B': setMode(mode === 'bbox' ? 'keypoint' : 'bbox'); break;
-    case 'v': case 'V':
-      if (hasCoords(keypoints[selectedKP])) {
-        keypoints[selectedKP].visible = VIS_VISIBLE;
-        markDirty(); updatePanel(); redraw();
-      } else setStatus('warn', 'Click image to place visible point');
-      break;
-    case 'o': case 'O': setVisState(VIS_OCCLUDED); break;
-    case 'u': case 'U': setVisState(VIS_OUTSIDE); break;
-    case 'r': case 'R': resetSelectedKP(); break;
-    case 'f': case 'F': fitToCanvas(); redraw(); break;
-    case '+': case '=': zoomButton(1); break;
-    case '-': case '_': zoomButton(-1); break;
-    case 'Tab':
-      e.preventDefault();
-      const idx = activeIndices();
-      const p = idx.indexOf(selectedKP);
-      selectKP(idx[(p + 1) % idx.length]);
-      break;
-    case '0': selectKP(9); break;
-  }
-  if (e.key >= '1' && e.key <= '9') selectKP(parseInt(e.key) - 1);
-});

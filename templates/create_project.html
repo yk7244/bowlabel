@@ -16,12 +16,12 @@
       <input type="text" name="description" placeholder="세션 메모">
     </div>
     <div class="form-group">
-      <label>Class: <code>{{ class_name }}</code> · 9 keypoints</label>
+      <label>Class: <code>{{ class_name }}</code> · 9 core keypoints (+3 optional)</label>
       <div class="schema-preview" style="margin:10px 0">
         {% for kp in schema_preview %}
-        <span class="schema-kp" title="{{ kp.desc }}">
+        <span class="schema-kp" title="{{ kp.desc }}" {% if kp.optional %}style="opacity:.6"{% endif %}>
           <span class="schema-kp-dot" style="background:{{ kp.color }}"></span>
-          {{ kp.label_short }}
+          {{ kp.label }}{% if kp.optional %} (opt){% endif %}
         </span>
         {% endfor %}
       </div>
