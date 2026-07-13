@@ -1,49 +1,94 @@
 {% extends "base.html" %}
 {% block title %}내 작업{% endblock %}
+{% block head %}
+<style>
+.lb-hero { display:flex; align-items:center; gap:20px; flex-wrap:wrap;
+  background:var(--bg-card); border:1px solid var(--border); border-radius:14px; padding:18px 20px; margin-bottom:16px; }
+.lb-hero h2 { margin:0; }
+.lb-hero p { color:var(--text-muted); font-size:13px; margin:4px 0 0; }
+.lb-stats { display:flex; gap:10px; }
+.lb-stat { background:var(--bg-elevated); border:1px solid var(--border); border-radius:10px; padding:10px 16px; text-align:center; min-width:92px; }
+.lb-stat .v { font-size:20px; font-weight:700; font-family:'JetBrains Mono',monospace; }
+.lb-stat .l { font-size:10px; color:var(--text-muted); letter-spacing:.08em; }
+.lb-stat .bar { height:5px; background:var(--bg-base); border-radius:3px; overflow:hidden; margin-top:6px; }
+.lb-stat .bar > div { height:100%; background:var(--green); }
+.lb-actions { margin-left:auto; display:flex; gap:8px; flex-wrap:wrap; }
+.filter-tabs { display:flex; gap:6px; margin-bottom:14px; }
+.filter-tabs a { padding:7px 14px; border-radius:8px; font-size:13px; font-weight:600;
+  background:var(--bg-card); border:1px solid var(--border); color:var(--text-muted); }
+.filter-tabs a.active { background:var(--bg-elevated); color:var(--text); border-color:var(--accent2); }
+.grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:10px; }
+.tcard { background:var(--bg-card); border:1px solid var(--border); border-radius:10px; overflow:hidden; display:block; position:relative; }
+.tcard:hover { border-color:var(--accent2); }
+.tcard .thumb { aspect-ratio:16/9; background:#05050c; position:relative; }
+.tcard .thumb img { width:100%; height:100%; object-fit:cover; display:block; }
+.tcard .st { position:absolute; top:6px; right:6px; font-size:9px; font-family:'JetBrains Mono',monospace;
+  padding:2px 7px; border-radius:5px; background:rgba(0,0,0,.7); }
+.st.done { color:#4ade80; } .st.prog { color:#fcd34d; } .st.todo { color:#94a3b8; }
+.tcard .b-batch { position:absolute; top:6px; left:6px; font-size:9px; padding:2px 6px; border-radius:5px;
+  background:rgba(0,0,0,.6); color:#ccc; font-family:'JetBrains Mono',monospace; }
+.tcard .meta { padding:7px 9px; font-size:11px; font-family:'JetBrains Mono',monospace; color:var(--text-muted); }
+</style>
+{% endblock %}
 {% block content %}
 
-<div class="labeler-hero">
-  <div class="labeler-hero-left">
+<div class="lb-hero">
+  <div>
     <h2>{{ username }}</h2>
-    <p>매 프레임마다 <strong>bbox 1개 + 키포인트 9개 전부</strong>. 안 보이면 가림/프레임밖 처리.</p>
+    <p>프레임마다 <strong>키포인트 9개 + 활축</strong>. bbox는 자동 생성됩니다.</p>
   </div>
-  <div class="labeler-stats">
+  <div class="lb-stats">
     {% for s in stats %}
-    <div class="labeler-stat">
-      <div class="labeler-stat-val">{{ s.done }}/{{ s.total }}</div>
-      <div class="labeler-stat-lbl">{{ 'PILOT' if s.batch_type=='pilot' else 'MAIN' }}</div>
+    <div class="lb-stat">
+      <div class="v">{{ s.done }}/{{ s.total }}</div>
+      <div class="l">{{ 'PILOT' if s.batch_type=='pilot' else 'MAIN' }}</div>
+      <div class="bar"><div style="width:{{ (100*s.done/s.total)|round(0,'floor') if s.total else 0 }}%"></div></div>
     </div>
     {% endfor %}
   </div>
-  <div style="display:flex;gap:8px;flex-wrap:wrap">
-    <button class="btn-claim" onclick="claimNext()">▶ 다음 작업</button>
-    <button class="btn-secondary btn-sm" onclick="claimNext('pilot')" style="padding:10px 16px">Pilot만</button>
+  <div class="lb-actions">
+    <button class="btn-primary" onclick="claimNext()">▶ 다음 미완료 작업</button>
+    <button class="btn-secondary btn-sm" onclick="claimNext('pilot')">Pilot만</button>
   </div>
 </div>
 
-{% if tasks %}
-<div class="table-wrap">
-  <table class="data-table">
-    <thead>
-      <tr><th>구분</th><th>프로젝트</th><th>영상</th><th>#</th><th>상태</th><th></th></tr>
-    </thead>
-    <tbody>
-      {% for t in tasks %}
-      <tr>
-        <td><span class="badge {{ 'badge-labeler' if t.batch_type=='pilot' else 'badge-pending' }}">
-          {{ 'PILOT' if t.batch_type=='pilot' else 'MAIN' }}</span></td>
-        <td>{{ t.project_name }}</td>
-        <td title="{{ t.original_name }}">{{ t.original_name[:24] }}…</td>
-        <td>#{{ t.frame_index }}</td>
-        <td><span class="badge badge-warn">{{ t.status }}</span></td>
-        <td><a href="{{ url_for('annotate', frame_id=t.id) }}" class="btn-sm btn-primary">라벨링</a></td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+<div class="filter-tabs">
+  <a href="?status=todo"  class="{{ 'active' if status_filter=='todo' else '' }}">해야 할 것</a>
+  <a href="?status=done"  class="{{ 'active' if status_filter=='done' else '' }}">완료</a>
+  <a href="?status=all"   class="{{ 'active' if status_filter=='all' else '' }}">전체</a>
+  <span style="margin-left:auto;align-self:center;color:var(--text-muted);font-size:12px;font-family:'JetBrains Mono',monospace">{{ total }}장</span>
 </div>
+
+{% if tasks %}
+<div class="grid">
+  {% for t in tasks %}
+  <a class="tcard" href="{{ url_for('annotate', frame_id=t.id) }}">
+    <div class="thumb">
+      <img src="{{ url_for('serve_frame', video_id=t.video_id, filename=t.filename) }}" loading="lazy">
+      <span class="b-batch">{{ t.batch_type }}</span>
+      {% if t.status in ['labeled','reviewed'] %}
+        <span class="st done">✓ done</span>
+      {% elif t.status == 'in_progress' %}
+        <span class="st prog">● 진행중</span>
+      {% else %}
+        <span class="st todo">○ todo</span>
+      {% endif %}
+    </div>
+    <div class="meta">#{{ t.frame_index }} · vid {{ t.video_id }}</div>
+  </a>
+  {% endfor %}
+</div>
+
+{% if pages > 1 %}
+<div class="pagination">
+  {% for p in range(1, pages+1) %}
+  <a href="?status={{ status_filter }}&page={{ p }}" class="page-btn {% if p==page %}active{% endif %}">{{ p }}</a>
+  {% endfor %}
+</div>
+{% endif %}
+
 {% else %}
-<div class="empty-state"><div class="empty-icon">✓</div><p>남은 작업 없음</p></div>
+<div class="empty-state"><div class="empty-icon">✓</div><p>이 조건에 해당하는 프레임이 없습니다.</p></div>
 {% endif %}
 
 <script>
@@ -54,7 +99,7 @@ async function claimNext(batch) {
   });
   const d = await r.json();
   if (d.url) location.href = d.url;
-  else alert(d.error || '작업 없음');
+  else alert(d.error || '남은 작업이 없습니다.');
 }
 </script>
 {% endblock %}

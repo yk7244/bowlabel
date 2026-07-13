@@ -350,8 +350,11 @@ def frame_gallery(pid):
         abort(404)
     batch_filter = request.args.get("batch", "all")
     video_filter = request.args.get("video", "all")
+    labeler_filter = request.args.get("labeler", "all")   # user_id or 'all'
+    status_filter = request.args.get("status", "all")     # all | done | todo
     page = max(1, int(request.args.get("page", 1)))
     per = 60
+
     where, params = ["f.project_id=?"], [pid]
     if batch_filter != "all":
         where.append("f.batch_type=?")
@@ -359,16 +362,40 @@ def frame_gallery(pid):
     if video_filter != "all":
         where.append("f.video_id=?")
         params.append(int(video_filter))
+
+    # When a specific labeler is selected we scope frames to that labeler's
+    # assignment and expose *their* status, so admin can pick done vs. to-do.
+    join_sql = "JOIN videos v ON v.id=f.video_id"
+    my_status_sql = "NULL AS my_status"
+    if labeler_filter != "all":
+        join_sql += " JOIN frame_assignments mfa ON mfa.frame_id=f.id AND mfa.user_id=?"
+        params.insert(0, int(labeler_filter))  # goes with the JOIN, before WHERE params
+        my_status_sql = "mfa.status AS my_status"
+        if status_filter == "done":
+            where.append("mfa.status IN ('labeled','reviewed')")
+        elif status_filter == "todo":
+            where.append("mfa.status IN ('unlabeled','in_progress')")
+    else:
+        if status_filter == "done":
+            where.append("""(SELECT COUNT(*) FROM frame_assignments fa WHERE fa.frame_id=f.id
+                             AND fa.status NOT IN ('labeled','reviewed'))=0
+                            AND (SELECT COUNT(*) FROM frame_assignments fa WHERE fa.frame_id=f.id)>0""")
+        elif status_filter == "todo":
+            where.append("""(SELECT COUNT(*) FROM frame_assignments fa WHERE fa.frame_id=f.id
+                             AND fa.status IN ('unlabeled','in_progress'))>0""")
+
     where_sql = " AND ".join(where)
-    total = conn.execute(f"SELECT COUNT(*) FROM frames f WHERE {where_sql}", params).fetchone()[0]
+    total = conn.execute(
+        f"SELECT COUNT(*) FROM frames f {join_sql} WHERE {where_sql}", params
+    ).fetchone()[0]
     frames = conn.execute(f"""
-        SELECT f.*, v.original_name,
+        SELECT f.*, v.original_name, {my_status_sql},
                (SELECT COUNT(*) FROM frame_assignments fa WHERE fa.frame_id=f.id
                 AND fa.status IN ('labeled','reviewed')) AS done_assignments,
                (SELECT COUNT(*) FROM frame_assignments fa WHERE fa.frame_id=f.id) AS total_assignments,
                (SELECT GROUP_CONCAT(u.username, ', ') FROM frame_assignments fa
                 JOIN users u ON u.id=fa.user_id WHERE fa.frame_id=f.id) AS assignees
-        FROM frames f JOIN videos v ON v.id=f.video_id
+        FROM frames f {join_sql}
         WHERE {where_sql}
         ORDER BY f.video_id, f.frame_index
         LIMIT ? OFFSET ?
@@ -379,6 +406,7 @@ def frame_gallery(pid):
     return render_template("frame_gallery.html",
                            proj=proj, frames=frames, videos=videos, labelers=labelers,
                            batch_filter=batch_filter, video_filter=video_filter,
+                           labeler_filter=labeler_filter, status_filter=status_filter,
                            page=page, per=per,
                            total=total, pages=(total + per - 1) // per)
 
@@ -547,6 +575,19 @@ def delete_frames_bulk():
     return jsonify({"ok": True, "deleted": n})
 
 
+def _export_error_page(pid, message):
+    back = url_for("project_detail", pid=pid)
+    html = f"""<!doctype html><meta charset="utf-8">
+    <div style="max-width:640px;margin:80px auto;font-family:sans-serif;color:#222">
+      <h2>내보내기를 완료할 수 없습니다</h2>
+      <p style="color:#b00">{message}</p>
+      <p>라벨링이 완료된(<code>labeled</code>) 프레임이 있는지 확인하세요.
+         진행 중(<code>in_progress</code>)이거나 미완료 프레임은 학습 export에 포함되지 않습니다.</p>
+      <p><a href="{back}">← 프로젝트로 돌아가기</a></p>
+    </div>"""
+    return html, 400
+
+
 @app.route("/admin/projects/<int:pid>/export/<fmt>")
 @login_required
 @admin_required
@@ -559,7 +600,18 @@ def export_project(pid, fmt):
     }
     if fmt not in paths:
         abort(400)
-    path = paths[fmt](pid)
+    conn = get_db()
+    proj = conn.execute("SELECT id FROM projects WHERE id=?", (pid,)).fetchone()
+    conn.close()
+    if not proj:
+        return _export_error_page(pid, "프로젝트를 찾을 수 없습니다. (DB가 초기화되었을 수 있습니다.)")
+    try:
+        path = paths[fmt](pid)
+    except Exception as e:  # noqa: BLE001 - surface any exporter failure nicely
+        app.logger.exception("export failed")
+        return _export_error_page(pid, f"내보내기 중 오류: {e}")
+    if not path or not Path(path).exists():
+        return _export_error_page(pid, "내보낼 데이터가 없습니다.")
     return send_file(path, as_attachment=True)
 
 
@@ -677,18 +729,35 @@ def claim_next_frame():
 @login_required
 def labeler_dashboard():
     uid = session["user_id"]
+    status_filter = request.args.get("status", "todo")   # todo | done | all
+    page = max(1, int(request.args.get("page", 1)))
+    per = 60
+
+    status_sql = {
+        "todo": "AND fa.status IN ('unlabeled','in_progress')",
+        "done": "AND fa.status IN ('labeled','reviewed')",
+        "all": "",
+    }.get(status_filter, "")
+
     conn = get_db()
-    tasks = conn.execute("""
-        SELECT fa.status, f.id, f.filename, f.frame_index, f.timestamp_sec, f.batch_type,
+    total = conn.execute(f"""
+        SELECT COUNT(*) FROM frame_assignments fa
+        JOIN frames f ON f.id=fa.frame_id
+        WHERE fa.user_id=? {status_sql}
+    """, (uid,)).fetchone()[0]
+
+    tasks = conn.execute(f"""
+        SELECT fa.status, f.id, f.filename, f.frame_index, f.video_id, f.batch_type,
                v.original_name, p.name AS project_name, p.id AS project_id
         FROM frame_assignments fa
         JOIN frames f ON f.id=fa.frame_id
         JOIN videos v ON v.id=f.video_id
         JOIN projects p ON p.id=f.project_id
-        WHERE fa.user_id=? AND fa.status IN ('unlabeled','in_progress')
-        ORDER BY CASE f.batch_type WHEN 'pilot' THEN 0 ELSE 1 END, f.id
-        LIMIT 300
-    """, (uid,)).fetchall()
+        WHERE fa.user_id=? {status_sql}
+        ORDER BY CASE f.batch_type WHEN 'pilot' THEN 0 ELSE 1 END, f.video_id, f.frame_index
+        LIMIT ? OFFSET ?
+    """, (uid, per, (page - 1) * per)).fetchall()
+
     stats = conn.execute("""
         SELECT f.batch_type,
                COUNT(*) AS total,
@@ -700,7 +769,30 @@ def labeler_dashboard():
     """, (uid,)).fetchall()
     conn.close()
     return render_template("labeler_dashboard.html",
-                           tasks=tasks, stats=stats, username=session["username"])
+                           tasks=tasks, stats=stats, username=session["username"],
+                           status_filter=status_filter, page=page,
+                           total=total, pages=(total + per - 1) // per, per=per)
+
+
+@app.route("/api/labeler/next-todo")
+@login_required
+def labeler_next_todo():
+    """Next unlabeled/in-progress frame for the current user (Roboflow-style flow)."""
+    uid = session["user_id"]
+    exclude = request.args.get("exclude", type=int)
+    conn = get_db()
+    row = conn.execute("""
+        SELECT fa.frame_id FROM frame_assignments fa
+        JOIN frames f ON f.id=fa.frame_id
+        WHERE fa.user_id=? AND fa.status IN ('unlabeled','in_progress')
+          AND (? IS NULL OR fa.frame_id != ?)
+        ORDER BY CASE f.batch_type WHEN 'pilot' THEN 0 ELSE 1 END, f.video_id, f.frame_index
+        LIMIT 1
+    """, (uid, exclude, exclude)).fetchone()
+    conn.close()
+    if not row:
+        return jsonify({"frame_id": None})
+    return jsonify({"frame_id": row["frame_id"], "url": url_for("annotate", frame_id=row["frame_id"])})
 
 
 # ── annotate ──────────────────────────────────────────────────────────────────
@@ -981,14 +1073,33 @@ def on_connect():
 
 
 if __name__ == "__main__":
-    if "--reset" in sys.argv:
-        reset_db()
+    # IMPORTANT: the reloader restarts this process on any file change (including
+    # writes to exports/ during an export). If --reset were re-applied on every
+    # restart it would wipe the database. We therefore (1) never enable the
+    # reloader, and (2) only honour --reset in the initial launch process.
+    is_reloader_child = os.environ.get("WERKZEUG_RUN_MAIN") == "true"
+    if "--reset" in sys.argv and not is_reloader_child:
+        confirm = "--yes" in sys.argv
+        if not confirm:
+            try:
+                ans = input("[!] --reset will DELETE all labeling data in data.db. "
+                            "Type 'reset' to confirm: ").strip().lower()
+                confirm = ans == "reset"
+            except (EOFError, KeyboardInterrupt):
+                confirm = False
+        if confirm:
+            reset_db()
+        else:
+            print("[DB] reset aborted; keeping existing data.")
+            init_db()
     else:
         init_db()
     seed_admin("admin", "admin1234")
     print("\n" + "=" * 52)
     print("  BowLabel v5 — 9 core keypoints · automatic interaction bbox")
     print("  http://localhost:5050   (admin / admin1234)")
-    print("  Reset DB:  python3 app.py --reset")
+    print("  Reset DB:  python3 app.py --reset   (asks for confirmation)")
     print("=" * 52 + "\n")
-    socketio.run(app, host="0.0.0.0", port=5050, debug=True, allow_unsafe_werkzeug=True)
+    # debug/reloader disabled on purpose: protects data.db from restart loops.
+    socketio.run(app, host="0.0.0.0", port=5050,
+                 debug=False, use_reloader=False, allow_unsafe_werkzeug=True)

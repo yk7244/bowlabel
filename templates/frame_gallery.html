@@ -48,6 +48,17 @@
     <option value="pilot" {% if batch_filter=='pilot' %}selected{% endif %}>Pilot</option>
     <option value="main" {% if batch_filter=='main' %}selected{% endif %}>Main</option>
   </select>
+  <select id="f-labeler" onchange="applyFilters()">
+    <option value="all" {% if labeler_filter=='all' %}selected{% endif %}>전체 라벨러</option>
+    {% for u in labelers %}
+    <option value="{{ u.id }}" {% if labeler_filter|string==u.id|string %}selected{% endif %}>{{ u.username }}</option>
+    {% endfor %}
+  </select>
+  <select id="f-status" onchange="applyFilters()">
+    <option value="all" {% if status_filter=='all' %}selected{% endif %}>전체 상태</option>
+    <option value="done" {% if status_filter=='done' %}selected{% endif %}>완료</option>
+    <option value="todo" {% if status_filter=='todo' %}selected{% endif %}>미완료</option>
+  </select>
   <span class="gal-count">{{ total }}장 · <span class="sel-count" id="sel-count">0</span> 선택</span>
 
   <span class="spacer"></span>
@@ -63,20 +74,27 @@
 
 <div class="frame-grid">
   {% for f in frames %}
+  {% set view_url = url_for('annotate', frame_id=f.id) + ('?as_user=' ~ labeler_filter if labeler_filter != 'all' else '') %}
   <div class="fcard" id="card-{{ f.id }}" data-fid="{{ f.id }}">
     <input type="checkbox" class="chk" value="{{ f.id }}" onchange="onCheck(this)">
-    <a class="thumb" href="{{ url_for('annotate', frame_id=f.id) }}">
+    <a class="thumb" href="{{ view_url }}">
       <img src="{{ url_for('serve_frame', video_id=f.video_id, filename=f.filename) }}" loading="lazy">
       <span class="b-batch {{ f.batch_type }}">{{ f.batch_type }}</span>
+      {% if labeler_filter != 'all' %}
+        {% if f.my_status in ['labeled','reviewed'] %}<span class="b-done" style="color:var(--green)">✓ done</span>
+        {% elif f.my_status == 'in_progress' %}<span class="b-done" style="color:var(--warn)">● 진행중</span>
+        {% else %}<span class="b-done" style="color:var(--text-muted)">○ todo</span>{% endif %}
+      {% else %}
       <span class="b-done" style="color:{{ 'var(--green)' if f.done_assignments and f.done_assignments==f.total_assignments else 'var(--text-muted)' }}">
         {{ f.done_assignments }}/{{ f.total_assignments }}</span>
+      {% endif %}
     </a>
     <div class="meta">
       <div class="idx">#{{ f.frame_index }} <span class="muted">· vid {{ f.video_id }}</span></div>
       <div class="who" title="{{ f.assignees or '미배정' }}">{{ f.assignees or '미배정' }}</div>
     </div>
     <div class="row2">
-      <a class="btn-sm btn-secondary" href="{{ url_for('annotate', frame_id=f.id) }}">보기</a>
+      <a class="btn-sm btn-secondary" href="{{ view_url }}">보기</a>
       <button class="btn-sm btn-secondary del-btn" onclick="deleteOne({{ f.id }})">삭제</button>
     </div>
   </div>
@@ -88,7 +106,7 @@
 {% if pages > 1 %}
 <div class="pagination">
   {% for p in range(1, pages+1) %}
-  <a href="?batch={{ batch_filter }}&video={{ video_filter }}&page={{ p }}"
+  <a href="?batch={{ batch_filter }}&video={{ video_filter }}&labeler={{ labeler_filter }}&status={{ status_filter }}&page={{ p }}"
      class="page-btn {% if p==page %}active{% endif %}">{{ p }}</a>
   {% endfor %}
 </div>
@@ -103,7 +121,9 @@ const selected = new Set();
 function applyFilters() {
   const v = document.getElementById('f-video').value;
   const b = document.getElementById('f-batch').value;
-  location.href = `?video=${v}&batch=${b}&page=1`;
+  const l = document.getElementById('f-labeler').value;
+  const s = document.getElementById('f-status').value;
+  location.href = `?video=${v}&batch=${b}&labeler=${l}&status=${s}&page=1`;
 }
 function onCheck(cb) {
   const id = +cb.value;

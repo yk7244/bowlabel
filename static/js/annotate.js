@@ -523,21 +523,36 @@ async function saveToServer() {
   try { return await saving; } finally { saving = null; }
 }
 
+async function goToNextTodo() {
+  // Roboflow-style: jump to the next unlabeled/in-progress frame in my queue.
+  try {
+    const r = await fetch(`/api/labeler/next-todo?exclude=${FRAME_ID}`);
+    const d = await r.json();
+    if (d && d.url) { location.href = d.url; return true; }
+  } catch (_) {}
+  if (NEXT_ID) { location.href = `/annotate/${NEXT_ID}`; return true; }
+  return false;
+}
+
 async function saveAnnotation(advance) {
   try {
     const d = await saveToServer();
-    if (d.complete) { setStatus('ok', 'saved'); if (advance && NEXT_ID) setTimeout(() => location.href = `/annotate/${NEXT_ID}`, 250); }
-    else { setStatus('warn', 'draft'); if (advance) maybeAdvance(d.missing || []); }
+    if (d.complete) {
+      setStatus('ok', 'saved');
+      if (advance && !(await goToNextTodo())) setStatus('ok', 'all done — no more to-do');
+    } else {
+      setStatus('warn', 'draft');
+      if (advance) maybeAdvance(d.missing || []);
+    }
   } catch (e) { setStatus('error', e.message); }
 }
 function maybeAdvance(missing) {
-  if (!NEXT_ID) return;
-  if (confirm('Incomplete:\n• ' + missing.join('\n• ') + '\n\nGo to next frame anyway?')) location.href = `/annotate/${NEXT_ID}`;
+  if (confirm('Incomplete:\n• ' + missing.join('\n• ') + '\n\nGo to next to-do anyway?')) goToNextTodo();
 }
 async function goNext() {
   const miss = getMissing();
-  if (miss.length && !confirm('Incomplete:\n• ' + miss.join('\n• ') + '\n\nSave draft and go to next?')) return;
-  try { await saveToServer(); if (NEXT_ID) location.href = `/annotate/${NEXT_ID}`; else setStatus('ok', 'saved (last frame)'); }
+  if (miss.length && !confirm('Incomplete:\n• ' + miss.join('\n• ') + '\n\nSave draft and go to next to-do?')) return;
+  try { await saveToServer(); if (!(await goToNextTodo())) setStatus('ok', 'all done — no more to-do'); }
   catch (e) { setStatus('error', e.message); }
 }
 

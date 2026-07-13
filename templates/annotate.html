@@ -130,14 +130,19 @@ select.labeler-sel { background: var(--bg-elevated); color: var(--text); border:
   <span id="save-status" class="save-status"></span>
   {% endif %}
 
+  {% if review_mode %}
+  <a href="{{ url_for('frame_gallery', pid=frame.project_id) }}" class="btn-sm btn-secondary" title="갤러리로">☰ 목록</a>
+  {% else %}
+  <a href="{{ url_for('labeler_dashboard') }}" class="btn-sm btn-secondary" title="내 작업 목록">☰ 목록</a>
+  {% endif %}
   {% if prev_id %}<a href="{{ url_for('annotate', frame_id=prev_id) }}{% if review_mode and target_uid %}?as_user={{ target_uid }}{% endif %}" class="btn-sm btn-secondary" title="Prev (←)">◀</a>
   {% else %}<button class="btn-sm btn-secondary" disabled>◀</button>{% endif %}
   {% if not review_mode %}
   <button class="btn-sm btn-secondary" onclick="copyFromPrev()" title="Copy previous (C)">Copy</button>
   <button class="btn-sm btn-secondary" onclick="saveAnnotation(false)" title="Save (S)">Save</button>
-  <button class="btn-sm btn-primary" onclick="goNext()" title="Save & next (Enter)">Save ▶</button>
+  <button class="btn-sm btn-primary" onclick="goNext()" title="Save & next-to-do (Enter)">저장 ▶ 다음</button>
   {% else %}
-  {% if next_id %}<a href="{{ url_for('annotate', frame_id=next_id) }}?as_user={{ target_uid }}" class="btn-sm btn-primary">▶</a>{% endif %}
+  {% if next_id %}<a href="{{ url_for('annotate', frame_id=next_id) }}?as_user={{ target_uid }}" class="btn-sm btn-primary" title="Next (→)">▶</a>{% endif %}
   {% endif %}
 </div>
 
@@ -247,5 +252,5 @@ const PREV_ID = {{ prev_id or 'null' }};
 </script>
 {% endblock %}
 {% block scripts %}
-<script src="{{ url_for('static', filename='js/annotate.js') }}?v=50"></script>
+<script src="{{ url_for('static', filename='js/annotate.js') }}?v=51"></script>
 {% endblock %}
